@@ -1,4 +1,4 @@
-// P/Invoke wrapper for BotController.dll (ABI 19), check IsCompatible() before use
+// P/Invoke wrapper for BotController.dll (ABI 20), check IsCompatible() before use
 // Main-thread only.
 
 using System.Runtime.InteropServices;
@@ -8,7 +8,7 @@ namespace BotControllerApi
     // Thin static binding over the native exports. No orchestration here.
     public static class BotController
     {
-        private const int ExpectedAbiVersion = 19;
+        private const int ExpectedAbiVersion = 20;
 
         // Sentinel weapon def meaning "any knife"
         public const int KnifeDef = 9001;
@@ -27,6 +27,29 @@ namespace BotControllerApi
 
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
         private static extern int BotController_GetVersion();
+
+        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int BotController_SetProjectileBirthAlignOffsets(
+            int initialPositionOffset,
+            int initialVelocityOffset);
+
+        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int BotController_QueueProjectileBirthAlign(
+            ulong entityPtr,
+            float posX,
+            float posY,
+            float posZ,
+            float velX,
+            float velY,
+            float velZ);
+
+        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int BotController_ClearProjectileBirthAlign();
+
+        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int BotController_GetProjectileBirthAlignStatus(
+            out ProjectileBirthAlignStatus status,
+            int size);
 
         // Imports the native usercmd injection export
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
@@ -81,12 +104,19 @@ namespace BotControllerApi
         private static extern int BotController_GetRecordedSubtickCount(int slot);
 
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int BotController_GetRecordedCommandCount(int slot);
+
+        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
         private static extern int BotController_CopyRecordedTicks(
             int slot, [Out] ReplayTick[] ticks, int maxTicks);
 
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
         private static extern int BotController_CopyRecordedSubticks(
             int slot, [Out] SubtickMove[] subs, int maxSubticks);
+
+        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int BotController_CopyRecordedCommands(
+            int slot, [Out] ReplayCommandFrame[] commands, int maxCommands);
 
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
         private static extern int BotController_LoadReplayExtended(
@@ -171,6 +201,35 @@ namespace BotControllerApi
         // Native C-ABI version the loaded DLL reports.
         public static int AbiVersion => BotController_GetVersion();
 
+        // Configures native projectile birth offsets for the loaded server build
+        public static bool ConfigureProjectileBirthAlign(int initialPositionOffset, int initialVelocityOffset)
+            => BotController_SetProjectileBirthAlignOffsets(initialPositionOffset, initialVelocityOffset) == 0;
+
+        // Queues one projectile's recorded birth position and velocity
+        public static bool QueueProjectileBirthAlign(
+            nint entityPtr,
+            ReplayVector3 position,
+            ReplayVector3 velocity)
+            => entityPtr != 0 &&
+               BotController_QueueProjectileBirthAlign(
+                   unchecked((ulong)entityPtr),
+                   position.X,
+                   position.Y,
+                   position.Z,
+                   velocity.X,
+                   velocity.Y,
+                   velocity.Z) == 0;
+
+        // Clears pending native projectile birth writes
+        public static int ClearProjectileBirthAlign()
+            => BotController_ClearProjectileBirthAlign();
+
+        // Returns native projectile birth alignment diagnostics
+        public static bool TryGetProjectileBirthAlignStatus(out ProjectileBirthAlignStatus status)
+            => BotController_GetProjectileBirthAlignStatus(
+                   out status,
+                   Marshal.SizeOf<ProjectileBirthAlignStatus>()) == 0;
+
         // Creates an independently cancellable native usercmd injection
         public static long InjectUsercmd(int slot, ulong buttonMask, int durationMs = 0)
             => BotController_InjectUsercmd(slot, buttonMask, durationMs);
@@ -246,12 +305,22 @@ namespace BotControllerApi
         // Pull a slot's recorded ticks + subticks out of native memory.
         public static (ReplayTick[] ticks, SubtickMove[] subs) GetRecordedMotion(int slot)
         {
+            var (ticks, subs, _) = GetRecordedMotionExtended(slot);
+            return (ticks, subs);
+        }
+
+        // Pull aligned tick, subtick, and command-frame buffers from native memory
+        public static (ReplayTick[] ticks, SubtickMove[] subs, ReplayCommandFrame[] commands)
+            GetRecordedMotionExtended(int slot)
+        {
             int nt = BotController_GetRecordedTickCount(slot);
-            if (nt <= 0) return (Array.Empty<ReplayTick>(), Array.Empty<SubtickMove>());
+            if (nt <= 0)
+                return (Array.Empty<ReplayTick>(), Array.Empty<SubtickMove>(), Array.Empty<ReplayCommandFrame>());
 
             var ticks = new ReplayTick[nt];
             int gotT = BotController_CopyRecordedTicks(slot, ticks, nt);
-            if (gotT <= 0) return (Array.Empty<ReplayTick>(), Array.Empty<SubtickMove>());
+            if (gotT <= 0)
+                return (Array.Empty<ReplayTick>(), Array.Empty<SubtickMove>(), Array.Empty<ReplayCommandFrame>());
             if (gotT != nt) Array.Resize(ref ticks, gotT);
 
             int ns = BotController_GetRecordedSubtickCount(slot);
@@ -265,7 +334,19 @@ namespace BotControllerApi
                 if (gotS <= 0) subs = Array.Empty<SubtickMove>();
                 else if (gotS != ns) Array.Resize(ref subs, gotS);
             }
-            return (ticks, subs);
+
+            int nc = BotController_GetRecordedCommandCount(slot);
+            ReplayCommandFrame[] commands;
+            if (nc <= 0)
+                commands = Array.Empty<ReplayCommandFrame>();
+            else
+            {
+                commands = new ReplayCommandFrame[nc];
+                int gotC = BotController_CopyRecordedCommands(slot, commands, nc);
+                if (gotC <= 0) commands = Array.Empty<ReplayCommandFrame>();
+                else if (gotC != nc) Array.Resize(ref commands, gotC);
+            }
+            return (ticks, subs, commands);
         }
 
         // ---- replay ----

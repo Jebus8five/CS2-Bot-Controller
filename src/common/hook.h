@@ -10,7 +10,7 @@
 #define BC_FASTCALL
 #endif
 
-namespace BotController {
+namespace bot_controller {
 // One funchook_t per hook; mirrors MinHook create/enable/remove usage
 class Hook
 {
@@ -64,4 +64,4 @@ class Hook
     funchook_t* m_fh = nullptr;
     bool m_enabled = false;
 };
-} // namespace BotController
+} // namespace bot_controller

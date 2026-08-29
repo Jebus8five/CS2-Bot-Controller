@@ -35,10 +35,21 @@ namespace BotControllerApi
         // Pull a slot's recorded ticks + subticks out of memory.
         (ReplayTick[] ticks, SubtickMove[] subs) GetRecordedMotion(int slot);
 
+        // Pull aligned tick, subtick, and command-frame buffers out of memory
+        (ReplayTick[] ticks, SubtickMove[] subs, ReplayCommandFrame[] commands)
+            GetRecordedMotionExtended(int slot);
+
         // ---- replay ----
 
         // Load ticks + subticks into a slot's replay buffer.
         bool LoadReplay(int slot, ReplayTick[] ticks, SubtickMove[] subs);
+
+        // Load ticks, subticks, and aligned command frames into a replay buffer
+        bool LoadReplayExtended(
+            int slot,
+            ReplayTick[] ticks,
+            SubtickMove[] subs,
+            ReplayCommandFrame[] commands);
 
         // Move a slot's just-recorded buffers into another slot's replay buffer.
         bool TransferRecordingToReplay(int srcSlot, int dstSlot);

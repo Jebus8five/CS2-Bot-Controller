@@ -8,13 +8,13 @@
 #include <nlohmann/json.hpp>
 #include "sig_scan.h"
 
-namespace BotController {
-namespace InputInjector {
+namespace bot_controller {
+namespace input_injector {
 // Max bots we track per-slot state for.
 static constexpr int kMaxSlots = 64;
 
 // Resolve sigs and install the movement hooks.
-bool Install(const nlohmann::json& gd, const Sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen);
+bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen);
 
 // Disable + remove the hooks.
 void Remove();
@@ -81,5 +81,5 @@ uint32_t LastOriginalControllerHandle();
 int LastControllerIndex();
 int LastOriginalControllerIndex();
 int LastOwnerSlot();
-} // namespace InputInjector
-} // namespace BotController
+} // namespace input_injector
+} // namespace bot_controller

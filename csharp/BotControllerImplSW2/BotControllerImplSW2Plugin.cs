@@ -66,10 +66,22 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
         // Returns the recorded tick and subtick buffers for a slot.
         public (ReplayTick[] ticks, SubtickMove[] subs) GetRecordedMotion(int slot)
             => BotController.GetRecordedMotion(slot);
+        // Returns aligned tick, subtick, and command-frame buffers for a slot
+        public (ReplayTick[] ticks, SubtickMove[] subs, ReplayCommandFrame[] commands)
+            GetRecordedMotionExtended(int slot)
+            => BotController.GetRecordedMotionExtended(slot);
 
         // Loads a replay buffer into a bot slot.
         public bool LoadReplay(int slot, ReplayTick[] ticks, SubtickMove[] subs)
             => BotController.LoadReplay(slot, ticks, subs);
+        // Loads aligned command frames without movement-extra data
+        public bool LoadReplayExtended(
+            int slot,
+            ReplayTick[] ticks,
+            SubtickMove[] subs,
+            ReplayCommandFrame[] commands)
+            => BotController.LoadReplayExtended(
+                slot, ticks, subs, commands, Array.Empty<ReplayMovementExtra>());
         // Moves a recorded buffer directly into another slot's replay buffer.
         public bool TransferRecordingToReplay(int srcSlot, int dstSlot)
             => BotController.TransferRecordingToReplay(srcSlot, dstSlot);
@@ -199,13 +211,17 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
 
         // Hook the server tick for replay driver
         Core.Event.OnTick += _driver.Tick;
+        RegisterProjectileEvents();
     }
 
     // Unhooks replay ticking during plugin unload.
     public override void Unload()
     {
         if (_nativeApiAvailable)
+        {
             Core.Event.OnTick -= _driver.Tick;
+            UnregisterProjectileEvents();
+        }
     }
 
     // ---- Helpers ----
@@ -306,6 +322,7 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
             context.Reply(Tag("Failed to start recording."));
             return;
         }
+        BeginProjectileRecording(player.Slot);
         _recordingFiles[player.Slot] = file;
         context.Reply(Tag("Recording. Use !stoprecord to finish."));
     }
@@ -317,13 +334,14 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
         var player = context.Sender;
         if (player == null || !player.IsValid) return;
 
+        ReplayProjectileEvent[] projectiles = FinishProjectileRecording(player.Slot);
         BotController.StopRecord(player.Slot);
 
         if (!_recordingFiles.Remove(player.Slot, out string? file) &&
             !TryGetRecordingFile(null, player.SteamID, out file))
             return;
 
-        int saved = MotionStore.SaveToFile(player.Slot, file, Tickrate);
+        int saved = MotionStore.SaveToFile(player.Slot, file, Tickrate, projectiles);
         context.Reply(saved > 0
             ? Tag($"Saved {saved} ticks.")
             : Tag("Nothing recorded."));
@@ -359,7 +377,13 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
         if (rec.Tickrate != Tickrate)
             context.Reply(Tag($"WARN tickrate mismatch: recorded {rec.Tickrate}, server {Tickrate}."));
 
-        if (BotController.LoadReplay(botSlot, rec.Ticks, rec.Subticks) &&
+        PrepareProjectileReplay(botSlot, rec);
+        if (BotController.LoadReplayExtended(
+                botSlot,
+                rec.Ticks,
+                rec.Subticks,
+                rec.Commands ?? Array.Empty<ReplayCommandFrame>(),
+                Array.Empty<ReplayMovementExtra>()) &&
             RegisterReplayPawnForSlot(botSlot) &&
             BotController.StartReplay(botSlot))
         {
@@ -368,6 +392,7 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
         }
         else
         {
+            ClearProjectileReplay(botSlot);
             context.Reply(Tag("Failed to start replay."));
         }
     }
@@ -383,6 +408,7 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
 
         BotController.StopReplay(botSlot);
         _driver.Release(botSlot);
+        ClearProjectileReplay(botSlot);
         context.Reply(Tag($"Stopped replay on bot slot {botSlot}."));
     }
 }

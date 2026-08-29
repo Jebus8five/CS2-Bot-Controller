@@ -16,7 +16,7 @@ using BotControllerApi;
 
 namespace BotControllerImpl;
 
-public class BotControllerPlugin : BasePlugin
+public partial class BotControllerPlugin : BasePlugin
 {
     public override string ModuleName => "BotControllerImpl";
     public override string ModuleVersion => "0.6.3";
@@ -46,6 +46,14 @@ public class BotControllerPlugin : BasePlugin
 
         Directory.CreateDirectory(RecordingsDir);
         RegisterListener<Listeners.OnTick>(_driver.Tick);
+        RegisterListener<Listeners.OnTick>(ProcessPendingProjectileCandidates);
+        RegisterListener<Listeners.OnEntitySpawned>(OnProjectileEntitySpawned);
+    }
+
+    // Clears projectile alignment state during managed plugin unload
+    public override void Unload(bool hotReload)
+    {
+        ClearAllProjectileState();
     }
 
     private string RecordingsDir => Path.Combine(ModuleDirectory, "recordings");
@@ -113,6 +121,7 @@ public class BotControllerPlugin : BasePlugin
             cmd.ReplyToCommand("[BotController] Failed to start recording.");
             return;
         }
+        BeginProjectileRecording(player.Slot);
         _recordingFiles[player.Slot] = file;
         cmd.ReplyToCommand("[BotController] Recording. Use !stoprecord to finish.");
     }
@@ -123,13 +132,14 @@ public class BotControllerPlugin : BasePlugin
     public void OnStopRecord(CCSPlayerController? player, CommandInfo cmd)
     {
         if (player == null || !player.IsValid) return;
+        ReplayProjectileEvent[] projectiles = FinishProjectileRecording(player.Slot);
         BotController.StopRecord(player.Slot);
 
         if (!_recordingFiles.Remove(player.Slot, out string? file) &&
             !TryGetRecordingFile(null, player.SteamID, out file))
             return;
 
-        int saved = MotionStore.SaveToFile(player.Slot, file, Tickrate);
+        int saved = MotionStore.SaveToFile(player.Slot, file, Tickrate, projectiles);
         cmd.ReplyToCommand(saved > 0
             ? $"[BotController] Saved {saved} ticks."
             : "[BotController] Nothing recorded.");
@@ -164,7 +174,13 @@ public class BotControllerPlugin : BasePlugin
         if (rec.Tickrate != Tickrate)
             cmd.ReplyToCommand($"[BotController] WARN tickrate mismatch: recorded {rec.Tickrate}, server {Tickrate}.");
 
-        if (BotController.LoadReplay(botSlot, rec.Ticks, rec.Subticks) &&
+        PrepareProjectileReplay(botSlot, rec);
+        if (BotController.LoadReplayExtended(
+                botSlot,
+                rec.Ticks,
+                rec.Subticks,
+                rec.Commands ?? Array.Empty<ReplayCommandFrame>(),
+                Array.Empty<ReplayMovementExtra>()) &&
             RegisterReplayPawnForSlot(botSlot) &&
             BotController.StartReplay(botSlot))
         {
@@ -173,6 +189,7 @@ public class BotControllerPlugin : BasePlugin
         }
         else
         {
+            ClearProjectileReplay(botSlot);
             cmd.ReplyToCommand("[BotController] Failed to start replay.");
         }
     }
@@ -186,6 +203,7 @@ public class BotControllerPlugin : BasePlugin
         if (!int.TryParse(cmd.GetArg(1), out int botSlot)) return;
         BotController.StopReplay(botSlot);
         _driver.Release(botSlot);
+        ClearProjectileReplay(botSlot);
         cmd.ReplyToCommand($"[BotController] Stopped replay on bot slot {botSlot}.");
     }
 }

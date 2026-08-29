@@ -5,8 +5,8 @@
 #include <array>
 #include <mutex>
 
-namespace BotController {
-namespace BuyControllerState {
+namespace bot_controller {
+namespace buy_controller_state {
 struct Entry
 {
     bool present = false;
@@ -71,5 +71,5 @@ int CountPlans()
         if (e.present) ++n;
     return n;
 }
-} // namespace BuyControllerState
-} // namespace BotController
+} // namespace buy_controller_state
+} // namespace bot_controller

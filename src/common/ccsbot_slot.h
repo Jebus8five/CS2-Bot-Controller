@@ -7,7 +7,7 @@
 #include <cstring>
 #include <type_traits>
 
-namespace BotController {
+namespace bot_controller {
 struct PawnControllerHandles
 {
     uint32_t controllerHandle;
@@ -85,4 +85,4 @@ PawnControllerHandles ReadPawnControllerHandles(void* pawn);
 
 // CCSPlayerController* (PhysicsSimulate arg0) -> slot via its own ehandle.
 int ControllerToSlot(void* controller);
-} // namespace BotController
+} // namespace bot_controller

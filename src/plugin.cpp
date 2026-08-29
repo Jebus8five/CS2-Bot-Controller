@@ -28,6 +28,7 @@
 #include "sig_scan.h"
 #include "schema_resolver.h"
 #include "platform.h"
+#include "ProjectileBirthAlign.h"
 #include "version_targets.h"
 
 class BotControllerPlugin : public ISmmPlugin
@@ -50,13 +51,13 @@ class BotControllerPlugin : public ISmmPlugin
     const char* GetLogTag() override { return "BC"; }
 };
 
-BotControllerPlugin g_BotControllerPlugin;
-PLUGIN_EXPOSE(BotControllerPlugin, g_BotControllerPlugin);
+BotControllerPlugin g_botControllerPlugin;
+PLUGIN_EXPOSE(BotControllerPlugin, g_botControllerPlugin);
 
 // addons/<name>/bin/<platform>/<lib> -> up 3 dirs -> addons/<name>/gamedata.json
 static std::string ComputeGamedataPath()
 {
-    std::string p = BotController::SelfModulePath();
+    std::string p = bot_controller::SelfModulePath();
     if (p.empty()) return "";
     for (int i = 0; i < 3; ++i)
     {
@@ -79,22 +80,27 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
     }
 
     char schemaError[256] = { 0 };
-    if (!BotController::Schema::Init(schemaError, sizeof(schemaError)))
+    if (!bot_controller::schema::Init(schemaError, sizeof(schemaError)))
     {
         std::snprintf(error, maxlen, "Schema initialization failed: %s", schemaError);
         return false;
     }
-    if (!BotController::targets::LoadFromSchema(schemaError, sizeof(schemaError)))
+    if (!bot_controller::targets::LoadFromSchema(schemaError, sizeof(schemaError)))
     {
-        BotController::Schema::Reset();
+        bot_controller::schema::Reset();
         std::snprintf(error, maxlen, "Schema target resolution failed: %s", schemaError);
         return false;
+    }
+    if (bot_controller::projectile_birth_align::ConfigureOffsets(bot_controller::targets::g_projectileInitialPosition,
+                                                                 bot_controller::targets::g_projectileInitialVelocity) != 0)
+    {
+        Warning("[BotController] projectile birth alignment offsets unavailable\n");
     }
     ConVar_Register(FCVAR_RELEASE | FCVAR_GAMEDLL);
 
     // IVEngineServer2::ClientCommand
-    BotController::Dispatch::g_pEngine = static_cast<IVEngineServer2*>(ismm->GetEngineFactory()(INTERFACEVERSION_VENGINESERVER, nullptr));
-    if (!BotController::Dispatch::g_pEngine)
+    bot_controller::dispatch::g_engine = static_cast<IVEngineServer2*>(ismm->GetEngineFactory()(INTERFACEVERSION_VENGINESERVER, nullptr));
+    if (!bot_controller::dispatch::g_engine)
     {
         std::snprintf(error, maxlen, "Failed to get IVEngineServer2 (%s)", INTERFACEVERSION_VENGINESERVER);
         return false;
@@ -109,10 +115,10 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
     }
 
     // Engine interface used by console command output (ClientPrintf).
-    BotController::Commands::g_pEngine = BotController::Dispatch::g_pEngine;
+    bot_controller::commands::g_engine = bot_controller::dispatch::g_engine;
 
     // Server-side command executor for issuing bot "buy" commands.
-    BotController::Dispatch::g_pGameClients = static_cast<ISource2GameClients*>(serverIface);
+    bot_controller::dispatch::g_gameClients = static_cast<ISource2GameClients*>(serverIface);
 
     // NetworkMessages lets the C ABI send recorded voice frames to clients.
     auto* networkMessages = static_cast<INetworkMessages*>(ismm->GetEngineFactory()(NETWORKMESSAGES_INTERFACE_VERSION, nullptr));
@@ -120,7 +126,7 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
     {
         networkMessages = static_cast<INetworkMessages*>(ismm->GetServerFactory()(NETWORKMESSAGES_INTERFACE_VERSION, nullptr));
     }
-    BotController::VoiceSender::SetInterfaces(BotController::Dispatch::g_pEngine, networkMessages);
+    bot_controller::voice_sender::SetInterfaces(bot_controller::dispatch::g_engine, networkMessages);
     if (!networkMessages)
     {
         Warning("[BotController] network messages interface unavailable; voice send disabled\n");
@@ -134,13 +140,13 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
     }
 
     nlohmann::json gd;
-    if (!BotController::Sig::LoadGamedata(gamedataPath.c_str(), gd))
+    if (!bot_controller::sig::LoadGamedata(gamedataPath.c_str(), gd))
     {
         std::snprintf(error, maxlen, "Failed to load gamedata: %s", gamedataPath.c_str());
         return false;
     }
 
-    BotController::Sig::ModuleInfo serverModule = BotController::Sig::ModuleFromInterfacePtr(serverIface);
+    bot_controller::sig::ModuleInfo serverModule = bot_controller::sig::ModuleFromInterfacePtr(serverIface);
     if (!serverModule)
     {
         std::snprintf(error, maxlen, "ModuleFromInterfacePtr returned null");
@@ -148,26 +154,26 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
     }
 
     // Resolve non-Schema offsets before installing hooks that read targets
-    BotController::targets::LoadFromGamedata(gd);
+    bot_controller::targets::LoadFromGamedata(gd);
 
-    if (!BotController::WeaponLockerHooks::Install(gd, serverModule, error, maxlen)) return false;
+    if (!bot_controller::weapon_locker_hooks::Install(gd, serverModule, error, maxlen)) return false;
 
-    if (!BotController::BotControllerHooks::Install(gd, serverModule, error, maxlen))
+    if (!bot_controller::bot_controller_hooks::Install(gd, serverModule, error, maxlen))
     {
-        BotController::WeaponLockerHooks::Remove();
+        bot_controller::weapon_locker_hooks::Remove();
         return false;
     }
 
     // BuyController is optional; missing sig only disables buy control
     char buyErr[256] = { 0 };
-    if (!BotController::BuyControllerHooks::Install(gd, serverModule, buyErr, sizeof(buyErr)))
+    if (!bot_controller::buy_controller_hooks::Install(gd, serverModule, buyErr, sizeof(buyErr)))
     {
         Warning("[BotController] BuyController::Install failed (%s); bot buy control disabled\n", buyErr);
     }
 
     // movement hooks for record/replay
     char injErr[256] = { 0 };
-    if (!BotController::InputInjector::Install(gd, serverModule, injErr, sizeof(injErr)))
+    if (!bot_controller::input_injector::Install(gd, serverModule, injErr, sizeof(injErr)))
     {
         Warning("[BotController] InputInjector::Install failed (%s); record/replay movement will be a no-op\n", injErr);
     }
@@ -177,20 +183,21 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
 
 bool BotControllerPlugin::Unload(char* /*error*/, size_t /*maxlen*/)
 {
-    BotController::MotionRecorder::ClearAll();
-    BotController::InputInjector::Remove();
-    BotController::BuyControllerHooks::Remove();
-    BotController::BuyControllerState::ClearAll();
-    BotController::BotControllerHooks::Remove();
-    BotController::WeaponLockerHooks::Remove();
-    BotController::WeaponLockerState::ClearAll();
-    BotController::BotControllerState::ClearAllAll();
-    BotController::BotControllerState::ClearAllAim();
-    BotController::Dispatch::g_pEngine = nullptr;
-    BotController::Dispatch::g_pGameClients = nullptr;
-    BotController::VoiceSender::SetInterfaces(nullptr, nullptr);
-    BotController::Commands::g_pEngine = nullptr;
-    BotController::Schema::Reset();
+    bot_controller::motion_recorder::ClearAll();
+    bot_controller::projectile_birth_align::Clear();
+    bot_controller::input_injector::Remove();
+    bot_controller::buy_controller_hooks::Remove();
+    bot_controller::buy_controller_state::ClearAll();
+    bot_controller::bot_controller_hooks::Remove();
+    bot_controller::weapon_locker_hooks::Remove();
+    bot_controller::weapon_locker_state::ClearAll();
+    bot_controller::bot_controller_state::ClearAllAll();
+    bot_controller::bot_controller_state::ClearAllAim();
+    bot_controller::dispatch::g_engine = nullptr;
+    bot_controller::dispatch::g_gameClients = nullptr;
+    bot_controller::voice_sender::SetInterfaces(nullptr, nullptr);
+    bot_controller::commands::g_engine = nullptr;
+    bot_controller::schema::Reset();
     ConVar_Unregister();
     g_pCVar = nullptr;
     return true;

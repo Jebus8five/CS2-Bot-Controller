@@ -8,7 +8,7 @@
 #include <dlfcn.h>
 #endif
 
-namespace BotController {
+namespace bot_controller {
 // Resolve the on-disk path of the module containing this function
 std::string SelfModulePath()
 {
@@ -26,4 +26,4 @@ std::string SelfModulePath()
     return std::string(info.dli_fname);
 #endif
 }
-} // namespace BotController
+} // namespace bot_controller

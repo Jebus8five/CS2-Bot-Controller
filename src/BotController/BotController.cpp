@@ -17,25 +17,25 @@
 #include <mutex>
 #include <vector>
 
-namespace tg = BotController::targets;
+namespace tg = bot_controller::targets;
 
-using Update_t = void(BC_FASTCALL*)(void* bot);
-using Upkeep_t = void(BC_FASTCALL*)(void* bot);
-using UpdateLookAngles_t = void(BC_FASTCALL*)(void* bot);
-using SetEyeAngles_t = void(BC_FASTCALL*)(void* pawn, float* angle);
+using UpdateT = void(BC_FASTCALL*)(void* bot);
+using UpkeepT = void(BC_FASTCALL*)(void* bot);
+using UpdateLookAnglesT = void(BC_FASTCALL*)(void* bot);
+using SetEyeAnglesT = void(BC_FASTCALL*)(void* pawn, float* angle);
 
-namespace BotController {
-namespace BotControllerHooks {
-static Update_t g_origUpdate = nullptr;
+namespace bot_controller {
+namespace bot_controller_hooks {
+static UpdateT g_origUpdate = nullptr;
 static void* g_addrUpdate = nullptr;
-static Upkeep_t g_origUpkeep = nullptr;
+static UpkeepT g_origUpkeep = nullptr;
 static void* g_addrUpkeep = nullptr;
-static UpdateLookAngles_t g_origUpdateLookAngles = nullptr;
+static UpdateLookAnglesT g_origUpdateLookAngles = nullptr;
 static void* g_addrUpdateLookAngles = nullptr;
-static SetEyeAngles_t g_origSetEyeAngles = nullptr;
+static SetEyeAnglesT g_origSetEyeAngles = nullptr;
 static void* g_addrSetEyeAngles = nullptr;
 #if defined(_WIN32)
-static void** g_ppEntityIdentityChunks = nullptr;
+static void** g_entityIdentityChunks = nullptr;
 #endif
 static bool g_installed = false;
 static std::string g_status = "not_attempted";
@@ -61,7 +61,7 @@ static float NormalizeDeg(float angle)
 // Resolves the entity identity chunk pointer referenced by SetEyeAngles.
 static void ResolveSetEyeAnglesEntityChunks(void* setEyeAngles)
 {
-    g_ppEntityIdentityChunks = nullptr;
+    g_entityIdentityChunks = nullptr;
     if (!setEyeAngles) return;
 
     constexpr size_t kSearchBytes = 0x120;
@@ -77,7 +77,7 @@ static void ResolveSetEyeAnglesEntityChunks(void* setEyeAngles)
 
         int32_t relative = 0;
         std::memcpy(&relative, code + i + 3, sizeof(relative));
-        g_ppEntityIdentityChunks = reinterpret_cast<void**>(functionBase + i + 7 + relative);
+        g_entityIdentityChunks = reinterpret_cast<void**>(functionBase + i + 7 + relative);
         return;
     }
 }
@@ -85,13 +85,13 @@ static void ResolveSetEyeAnglesEntityChunks(void* setEyeAngles)
 // Resolves the live controller owning a replay pawn through entity chunks.
 static void* ReplayControllerForPawn(void* pawn)
 {
-    if (!pawn || !g_ppEntityIdentityChunks) return nullptr;
+    if (!pawn || !g_entityIdentityChunks) return nullptr;
 
     uint32_t handle = 0;
-    if (!SafeRead(pawn, tg::kPawn_Controller, handle) || handle == 0xFFFFFFFFu || handle == 0xFFFFFFFEu) return nullptr;
+    if (!SafeRead(pawn, tg::g_pawnController, handle) || handle == 0xFFFFFFFFu || handle == 0xFFFFFFFEu) return nullptr;
 
     void* chunks = nullptr;
-    if (!TryReadMemory(g_ppEntityIdentityChunks, 0, &chunks, sizeof(chunks)) || !chunks) return nullptr;
+    if (!TryReadMemory(g_entityIdentityChunks, 0, &chunks, sizeof(chunks)) || !chunks) return nullptr;
 
     const uint32_t entityIndex = handle & 0x7FFFu;
     void* chunk = nullptr;
@@ -116,15 +116,15 @@ static bool ApplyReplayEyeAnglesInternal(void* pawn, float pitch, float yaw)
     void* controller = ReplayControllerForPawn(pawn);
     uint32_t controllerFlags = 0;
     bool restoreFakeClient = false;
-    if (controller && SafeRead(controller, tg::kEnt_Flags, controllerFlags) && (controllerFlags & 0x100u) != 0)
+    if (controller && SafeRead(controller, tg::g_entFlags, controllerFlags) && (controllerFlags & 0x100u) != 0)
     {
         const uint32_t publishedFlags = controllerFlags & ~0x100u;
-        restoreFakeClient = WriteField(controller, tg::kEnt_Flags, publishedFlags);
+        restoreFakeClient = WriteField(controller, tg::g_entFlags, publishedFlags);
     }
 #endif
     g_origSetEyeAngles(pawn, angle);
 #if defined(_WIN32)
-    if (restoreFakeClient) WriteField(controller, tg::kEnt_Flags, controllerFlags);
+    if (restoreFakeClient) WriteField(controller, tg::g_entFlags, controllerFlags);
 #endif
     return true;
 }
@@ -138,10 +138,10 @@ static void BC_FASTCALL HookedUpdate(void* bot)
         std::lock_guard<std::mutex> lk(g_slotToBotMu);
         g_slotToBot[slot] = bot;
     }
-    if (slot >= 0 && (BotControllerState::GetAll(slot) || MotionRecorder::IsReplaying(slot)))
+    if (slot >= 0 && (bot_controller_state::GetAll(slot) || motion_recorder::IsReplaying(slot)))
     {
         const uint8_t ticked = 1;
-        WriteField(bot, tg::kBot_AiTickedFlag, ticked);
+        WriteField(bot, tg::g_botAiTickedFlag, ticked);
         return;
     }
     g_origUpdate(bot);
@@ -154,8 +154,8 @@ static void BC_FASTCALL HookedUpdateLookAngles(void* bot); // fwd decl
 static void BC_FASTCALL HookedUpkeep(void* bot)
 {
     int slot = CCSBotContextToSlot(bot);
-    if (slot >= 0 && MotionRecorder::IsReplaying(slot)) return;
-    if (slot >= 0 && (BotControllerState::GetAll(slot) || BotControllerState::GetAim(slot)))
+    if (slot >= 0 && motion_recorder::IsReplaying(slot)) return;
+    if (slot >= 0 && (bot_controller_state::GetAll(slot) || bot_controller_state::GetAim(slot)))
     {
         return;
     }
@@ -166,7 +166,8 @@ static void BC_FASTCALL HookedUpkeep(void* bot)
 static void BC_FASTCALL HookedUpdateLookAngles(void* bot)
 {
     int slot = CCSBotContextToSlot(bot);
-    if (slot >= 0 && (MotionRecorder::IsReplaying(slot) || BotControllerState::GetAll(slot) || BotControllerState::GetAim(slot))) return;
+    if (slot >= 0 && (motion_recorder::IsReplaying(slot) || bot_controller_state::GetAll(slot) || bot_controller_state::GetAim(slot)))
+        return;
     g_origUpdateLookAngles(bot);
 }
 
@@ -174,21 +175,21 @@ static void BC_FASTCALL HookedUpdateLookAngles(void* bot)
 static void BC_FASTCALL HookedSetEyeAngles(void* pawn, float* angle)
 {
     int slot = pawn ? ControllerSlotForPawn(pawn) : -1;
-    if (slot >= 0 && MotionRecorder::IsReplaying(slot)) return;
+    if (slot >= 0 && motion_recorder::IsReplaying(slot)) return;
     g_origSetEyeAngles(pawn, angle);
 }
 
 // Resolve a sig from gamedata against the loaded server.dll.
-bool Install(const nlohmann::json& gd, const Sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
+bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
 {
-    g_addrUpdate = Sig::ResolveSig(gd, serverModule, "CCSBot::Update", errorOut, errorOutLen);
+    g_addrUpdate = sig::ResolveSig(gd, serverModule, "CCSBot::Update", errorOut, errorOutLen);
     if (!g_addrUpdate)
     {
         g_status = "failed: Update sig";
         return false;
     }
 
-    g_addrUpkeep = Sig::ResolveSig(gd, serverModule, "CCSBot::Upkeep", errorOut, errorOutLen);
+    g_addrUpkeep = sig::ResolveSig(gd, serverModule, "CCSBot::Upkeep", errorOut, errorOutLen);
     if (!g_addrUpkeep)
     {
         g_status = "failed: Upkeep sig";
@@ -197,7 +198,7 @@ bool Install(const nlohmann::json& gd, const Sig::ModuleInfo& serverModule, char
 
     // UpdateLookAngles is optional
     char ulaErr[256] = { 0 };
-    g_addrUpdateLookAngles = Sig::ResolveSig(gd, serverModule, "CCSBot::UpdateLookAngles", ulaErr, sizeof(ulaErr));
+    g_addrUpdateLookAngles = sig::ResolveSig(gd, serverModule, "CCSBot::UpdateLookAngles", ulaErr, sizeof(ulaErr));
     if (!g_addrUpdateLookAngles)
     {
         Warning("[BotController] CCSBot::UpdateLookAngles sig not resolved (%s); replay view-drive disabled\n", ulaErr);
@@ -206,7 +207,7 @@ bool Install(const nlohmann::json& gd, const Sig::ModuleInfo& serverModule, char
     // SetEyeAngles is optional; without it replay view falls back to
     // the (smoothing) UpdateLookAngles hook only.
     char seaErr[256] = { 0 };
-    g_addrSetEyeAngles = Sig::ResolveSig(gd, serverModule, "CCSPlayerPawn::SetEyeAngles", seaErr, sizeof(seaErr));
+    g_addrSetEyeAngles = sig::ResolveSig(gd, serverModule, "CCSPlayerPawn::SetEyeAngles", seaErr, sizeof(seaErr));
     if (!g_addrSetEyeAngles)
     {
         Warning("[BotController] CCSPlayerPawn::SetEyeAngles sig not resolved (%s); replay 1:1 view disabled\n", seaErr);
@@ -281,7 +282,7 @@ void Remove()
     g_hookSetEyeAngles.Remove();
     g_origSetEyeAngles = nullptr;
 #if defined(_WIN32)
-    g_ppEntityIdentityChunks = nullptr;
+    g_entityIdentityChunks = nullptr;
 #endif
     g_hookUpdateLookAngles.Remove();
     g_origUpdateLookAngles = nullptr;
@@ -313,5 +314,5 @@ void* BotForSlot(int slot)
     std::lock_guard<std::mutex> lk(g_slotToBotMu);
     return g_slotToBot[slot];
 }
-} // namespace BotControllerHooks
-} // namespace BotController
+} // namespace bot_controller_hooks
+} // namespace bot_controller

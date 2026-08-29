@@ -7,7 +7,7 @@
 class IVEngineServer2;
 class ISource2GameClients;
 
-namespace BotController {
+namespace bot_controller {
 // Mirror BotControllerApi.LockKind on the C# side.
 enum class LockKind : int
 {
@@ -16,10 +16,10 @@ enum class LockKind : int
     Weapon = 2,
 };
 
-namespace Dispatch {
-extern IVEngineServer2* g_pEngine;
+namespace dispatch {
+extern IVEngineServer2* g_engine;
 // Server-side console command executor; runs "buy" for a bot slot.
-extern ISource2GameClients* g_pGameClients;
+extern ISource2GameClients* g_gameClients;
 
 // arg = LockTarget int for Weapon kind
 int Lock(int slot, LockKind kind, int arg);
@@ -30,5 +30,5 @@ int UnlockAll(LockKind kind);
 
 // 1 if All/Aim locked; Weapon returns LockTarget int.
 int IsLocked(int slot, LockKind kind);
-} // namespace Dispatch
-} // namespace BotController
+} // namespace dispatch
+} // namespace bot_controller

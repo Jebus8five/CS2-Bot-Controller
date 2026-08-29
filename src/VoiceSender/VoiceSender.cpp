@@ -9,8 +9,8 @@
 
 #include <cmath>
 
-namespace BotController {
-namespace VoiceSender {
+namespace bot_controller {
+namespace voice_sender {
 static IVEngineServer2* g_engine = nullptr;
 static INetworkMessages* g_networkMessages = nullptr;
 static INetworkMessageInternal* g_voiceMessage = nullptr;
@@ -102,5 +102,5 @@ int SendVoiceFrame(int recipientSlot,
     g_networkMessages->DeallocateNetMessageAbstract(messageType, base);
     return ok ? 0 : -6;
 }
-} // namespace VoiceSender
-} // namespace BotController
+} // namespace voice_sender
+} // namespace bot_controller

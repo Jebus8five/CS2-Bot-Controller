@@ -11,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <vector>
 
@@ -18,16 +19,16 @@
 #include <eiface.h>
 #include <playerslot.h>
 
-namespace tg = BotController::targets;
+namespace tg = bot_controller::targets;
 
-namespace BotController {
-namespace MotionRecorder {
+namespace bot_controller {
+namespace motion_recorder {
 #if defined(_WIN32)
 using DropWeaponResult = uint8_t;
 #else
 using DropWeaponResult = void*;
 #endif
-using DropWeapon_t = DropWeaponResult(BC_FASTCALL*)(void* weaponServices, void* weapon, void* target, void* velocity);
+using DropWeaponT = DropWeaponResult(BC_FASTCALL*)(void* weaponServices, void* weapon, void* target, void* velocity);
 
 struct RecordState
 {
@@ -40,13 +41,16 @@ struct RecordState
     std::atomic<bool> recording{ false };
     std::vector<ReplayTick> ticks;
     std::vector<SubtickMove> subs;
+    std::vector<ReplayCommandFrameData> commands;
     // Subtick moves seen on PlayerRunCommand, awaiting the matching
     // ProcessMovement post that commits them to a tick.
     std::vector<SubtickMove> pendingSubs;
+    ReplayCommandFrameData pendingCommand{};
+    bool havePendingCommand{ false };
     MovementSnapshot pendingPre{};
     bool havePre{ false };
-    uint32_t pendingEventFlags{ ReplayEvent_None };
-    ReplayDropEvent pendingDropEvent{ -1, ReplayDropVector_None, {}, {} };
+    uint32_t pendingEventFlags{ ReplayEventNone };
+    ReplayDropEvent pendingDropEvent{ -1, ReplayDropVectorNone, {}, {} };
     std::vector<DropCandidate> pendingDropCandidates;
     std::atomic<void*> liveWs{ nullptr };
     std::atomic<int> currentDef{ -1 };
@@ -81,7 +85,7 @@ static std::atomic<uint64_t> g_dropReplayVectorOverrideCount{ 0 };
 static std::atomic<uint64_t> g_dropReplayDetachedCount{ 0 };
 static std::atomic<uint64_t> g_dropReplayNativeCallCount{ 0 };
 static std::atomic<int> g_lastDropCaptureSlot{ -1 };
-static std::atomic<uint32_t> g_lastDropCaptureVectorFlags{ ReplayDropVector_None };
+static std::atomic<uint32_t> g_lastDropCaptureVectorFlags{ ReplayDropVectorNone };
 static std::atomic<int> g_lastDropHookSlot{ -1 };
 static std::atomic<int> g_lastDropHookWeaponDef{ -1 };
 static std::atomic<bool> g_lastDropHookWasRecording{ false };
@@ -90,9 +94,9 @@ static std::atomic<void*> g_lastDropHookTarget{ nullptr };
 static std::atomic<void*> g_lastDropHookVelocity{ nullptr };
 static std::atomic<int> g_lastDropReplaySlot{ -1 };
 static std::atomic<int> g_lastDropReplayWeaponDef{ -1 };
-static std::atomic<uint32_t> g_lastDropReplayVectorFlags{ ReplayDropVector_None };
+static std::atomic<uint32_t> g_lastDropReplayVectorFlags{ ReplayDropVectorNone };
 static Hook g_hookDropWeapon;
-static DropWeapon_t g_origDropWeapon = nullptr;
+static DropWeaponT g_origDropWeapon = nullptr;
 static void* g_addrDropWeapon = nullptr;
 static std::atomic<bool> g_dropHookTried{ false };
 static std::atomic<bool> g_dropHookReady{ false };
@@ -102,28 +106,23 @@ constexpr int kMolotovDef = 46;
 constexpr int kIncendiaryDef = 48;
 
 static bool ValidSlot(int s) { return s >= 0 && s < kMaxSlots; }
+static int ReplayWeaponSelectForDef(int slot, int recordedDef);
 
 // Returns whether an item definition is either faction's fire grenade
-static bool IsFireGrenadeDef(int defIndex)
-{
-    return defIndex == kMolotovDef || defIndex == kIncendiaryDef;
-}
+static bool IsFireGrenadeDef(int defIndex) { return defIndex == kMolotovDef || defIndex == kIncendiaryDef; }
 
 // Prefers the recorded fire grenade and falls back to the other faction's variant
 static void* FindReplayWeaponByDef(void* ws, int recordedDef)
 {
-    void* weapon = WeaponLockerHooks::FindWeaponByDef(ws, recordedDef);
+    void* weapon = weapon_locker_hooks::FindWeaponByDef(ws, recordedDef);
     if (weapon || !IsFireGrenadeDef(recordedDef)) return weapon;
 
     const int alternateDef = recordedDef == kMolotovDef ? kIncendiaryDef : kMolotovDef;
-    return WeaponLockerHooks::FindWeaponByDef(ws, alternateDef);
+    return weapon_locker_hooks::FindWeaponByDef(ws, alternateDef);
 }
 
 // Copies an optional engine Vector into stable recording storage
-static bool ReadDropVector(void* vector, float out[3])
-{
-    return vector && TryReadMemory(vector, 0, out, sizeof(float) * 3);
-}
+static bool ReadDropVector(void* vector, float out[3]) { return vector && TryReadMemory(vector, 0, out, sizeof(float) * 3); }
 
 // Prefers the recorder's exact cached weapon-services owner over controller handles
 static int RecordingSlotForWeaponServices(void* weaponServices, void* pawn)
@@ -131,9 +130,7 @@ static int RecordingSlotForWeaponServices(void* weaponServices, void* pawn)
     for (int slot = 0; slot < kMaxSlots; ++slot)
     {
         RecordState& r = g_rec[slot];
-        if (r.recording.load(std::memory_order_acquire) &&
-            r.liveWs.load(std::memory_order_relaxed) == weaponServices)
-            return slot;
+        if (r.recording.load(std::memory_order_acquire) && r.liveWs.load(std::memory_order_relaxed) == weaponServices) return slot;
     }
 
     const int slot = ControllerSlotForPawn(pawn);
@@ -145,7 +142,7 @@ static int ReplaySlotForWeaponServices(void* weaponServices)
 {
     for (int slot = 0; slot < kMaxSlots; ++slot)
     {
-        if (IsReplaying(slot) && WeaponLockerHooks::WsForSlot(slot) == weaponServices) return slot;
+        if (IsReplaying(slot) && weapon_locker_hooks::WsForSlot(slot) == weaponServices) return slot;
     }
     return -1;
 }
@@ -158,7 +155,7 @@ static bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
     if (!r.recording.load(std::memory_order_acquire)) return false;
 
     std::lock_guard<std::mutex> lk(r.mu);
-    r.pendingEventFlags |= ReplayEvent_Drop;
+    r.pendingEventFlags |= ReplayEventDrop;
     r.pendingDropEvent = event;
     g_dropCaptureCount.fetch_add(1, std::memory_order_relaxed);
     g_lastDropCaptureSlot.store(slot, std::memory_order_relaxed);
@@ -172,19 +169,18 @@ static DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void*
     g_dropHookCallCount.fetch_add(1, std::memory_order_relaxed);
 
     void* pawn = nullptr;
-    if (weaponServices) GuardedRead(weaponServices, tg::kServices_Pawn, pawn);
+    if (weaponServices) GuardedRead(weaponServices, tg::g_servicesPawn, pawn);
     const int recordingSlot = RecordingSlotForWeaponServices(weaponServices, pawn);
     const int replaySlot = ValidSlot(g_activeReplayDropSlot) ? g_activeReplayDropSlot : ReplaySlotForWeaponServices(weaponServices);
     const int slot = ValidSlot(recordingSlot) ? recordingSlot : replaySlot;
-    int weaponDefIndex = WeaponLockerHooks::ReadDefIndex(weapon);
-    if (weaponDefIndex < 0 && weaponServices) weaponDefIndex = WeaponLockerHooks::ActiveWeaponDef(weaponServices);
-    if (weaponDefIndex < 0 && ValidSlot(recordingSlot))
-        weaponDefIndex = g_rec[recordingSlot].currentDef.load(std::memory_order_relaxed);
+    int weaponDefIndex = weapon_locker_hooks::ReadDefIndex(weapon);
+    if (weaponDefIndex < 0 && weaponServices) weaponDefIndex = weapon_locker_hooks::ActiveWeaponDef(weaponServices);
+    if (weaponDefIndex < 0 && ValidSlot(recordingSlot)) weaponDefIndex = g_rec[recordingSlot].currentDef.load(std::memory_order_relaxed);
 
     ReplayDropEvent recordedEvent{};
     recordedEvent.weaponDefIndex = weaponDefIndex;
-    if (ReadDropVector(target, recordedEvent.target)) recordedEvent.vectorFlags |= ReplayDropVector_Target;
-    if (ReadDropVector(velocity, recordedEvent.velocity)) recordedEvent.vectorFlags |= ReplayDropVector_Velocity;
+    if (ReadDropVector(target, recordedEvent.target)) recordedEvent.vectorFlags |= ReplayDropVectorTarget;
+    if (ReadDropVector(velocity, recordedEvent.velocity)) recordedEvent.vectorFlags |= ReplayDropVectorVelocity;
 
     float replayTarget[3] = {};
     float replayVelocity[3] = {};
@@ -192,16 +188,18 @@ static DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void*
     void* effectiveVelocity = velocity;
     if (g_activeReplayDropEvent)
     {
-        if (g_activeReplayDropEvent->vectorFlags != ReplayDropVector_None)
+        if (g_activeReplayDropEvent->vectorFlags != ReplayDropVectorNone)
             g_dropReplayVectorOverrideCount.fetch_add(1, std::memory_order_relaxed);
-        if ((g_activeReplayDropEvent->vectorFlags & ReplayDropVector_Target) != 0)
+        if ((g_activeReplayDropEvent->vectorFlags & ReplayDropVectorTarget) != 0)
         {
-            for (int i = 0; i < 3; ++i) replayTarget[i] = g_activeReplayDropEvent->target[i];
+            for (int i = 0; i < 3; ++i)
+                replayTarget[i] = g_activeReplayDropEvent->target[i];
             effectiveTarget = replayTarget;
         }
-        if ((g_activeReplayDropEvent->vectorFlags & ReplayDropVector_Velocity) != 0)
+        if ((g_activeReplayDropEvent->vectorFlags & ReplayDropVectorVelocity) != 0)
         {
-            for (int i = 0; i < 3; ++i) replayVelocity[i] = g_activeReplayDropEvent->velocity[i];
+            for (int i = 0; i < 3; ++i)
+                replayVelocity[i] = g_activeReplayDropEvent->velocity[i];
             effectiveVelocity = replayVelocity;
         }
     }
@@ -221,8 +219,8 @@ static DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void*
     g_lastDropHookVelocity.store(effectiveVelocity, std::memory_order_relaxed);
 
     const DropWeaponResult result = g_origDropWeapon(weaponServices, weapon, effectiveTarget, effectiveVelocity);
-    const bool detached = weaponServices && weapon && weaponDefIndex >= 0 &&
-                          WeaponLockerHooks::FindWeaponByDef(weaponServices, weaponDefIndex) != weapon;
+    const bool detached =
+        weaponServices && weapon && weaponDefIndex >= 0 && weapon_locker_hooks::FindWeaponByDef(weaponServices, weaponDefIndex) != weapon;
     if (detached && ValidSlot(recordingSlot))
     {
         g_dropHookPhysicalDropCount.fetch_add(1, std::memory_order_relaxed);
@@ -255,8 +253,7 @@ static void EnsureDropWeaponHook(void* weaponServices)
 
     void** vtable = nullptr;
     if (!GuardedRead(weaponServices, 0, vtable) || !vtable) return;
-    if (!GuardedRead(vtable, tg::kVtIdx_DropWeapon * static_cast<int>(sizeof(void*)), g_addrDropWeapon) || !g_addrDropWeapon)
-        return;
+    if (!GuardedRead(vtable, tg::g_vtIdxDropWeapon * static_cast<int>(sizeof(void*)), g_addrDropWeapon) || !g_addrDropWeapon) return;
 
     if (g_hookDropWeapon.Create(g_addrDropWeapon, reinterpret_cast<void*>(&HookedDropWeapon),
                                 reinterpret_cast<void**>(&g_origDropWeapon)) &&
@@ -293,30 +290,30 @@ static bool WriteVector3(void* base, int offset, float x, float y, float z)
 static void* ResolveSceneNode(void* entity)
 {
     void* body = nullptr;
-    if (!GuardedRead(entity, tg::kEnt_BodyComponent, body) || !body) return nullptr;
+    if (!GuardedRead(entity, tg::g_entBodyComponent, body) || !body) return nullptr;
 
     void* node = nullptr;
-    return GuardedRead(body, tg::kBody_SceneNode, node) ? node : nullptr;
+    return GuardedRead(body, tg::g_bodySceneNode, node) ? node : nullptr;
 }
 
 // Read a MovementSnapshot from live engine state (services -> pawn).
 static bool ReadSnapshot(int slot, void* services, MovementSnapshot& out)
 {
     if (!services) return false;
-    void* pawn = InputInjector::ResolveReplayPawn(slot, services);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return false;
 
     void* node = ResolveSceneNode(pawn);
-    return node && ReadVector3(pawn, tg::kEnt_AbsVelocity, out.velX, out.velY, out.velZ) &&
-           SafeRead(pawn, tg::kEnt_Flags, out.entityFlags) && SafeRead(pawn, tg::kEnt_MoveType, out.moveType) &&
-           SafeRead(pawn, tg::kEnt_ActualMoveType, out.actualMoveType) && SafeRead(services, tg::kServices_Buttons, out.buttons) &&
-           SafeRead(services, tg::kServices_Buttons1, out.buttons1) && SafeRead(services, tg::kServices_Buttons2, out.buttons2) &&
-           SafeRead(services, tg::kServices_DuckAmount, out.duckAmount) && SafeRead(services, tg::kServices_DuckSpeed, out.duckSpeed) &&
-           ReadVector3(services, tg::kServices_LadderNormal, out.ladderNormalX, out.ladderNormalY, out.ladderNormalZ) &&
-           SafeRead(services, tg::kServices_Ducked, out.ducked) && SafeRead(services, tg::kServices_Ducking, out.ducking) &&
-           SafeRead(services, tg::kServices_DesiresDuck, out.desiresDuck) &&
-           ReadVector3(pawn, tg::kPawn_ViewAngle, out.pitch, out.yaw, out.roll) &&
-           ReadVector3(node, tg::kNode_AbsOrigin, out.originX, out.originY, out.originZ);
+    return node && ReadVector3(pawn, tg::g_entAbsVelocity, out.velX, out.velY, out.velZ) &&
+           SafeRead(pawn, tg::g_entFlags, out.entityFlags) && SafeRead(pawn, tg::g_entMoveType, out.moveType) &&
+           SafeRead(pawn, tg::g_entActualMoveType, out.actualMoveType) && SafeRead(services, tg::g_servicesButtons, out.buttons) &&
+           SafeRead(services, tg::g_servicesButtons1, out.buttons1) && SafeRead(services, tg::g_servicesButtons2, out.buttons2) &&
+           SafeRead(services, tg::g_servicesDuckAmount, out.duckAmount) && SafeRead(services, tg::g_servicesDuckSpeed, out.duckSpeed) &&
+           ReadVector3(services, tg::g_servicesLadderNormal, out.ladderNormalX, out.ladderNormalY, out.ladderNormalZ) &&
+           SafeRead(services, tg::g_servicesDucked, out.ducked) && SafeRead(services, tg::g_servicesDucking, out.ducking) &&
+           SafeRead(services, tg::g_servicesDesiresDuck, out.desiresDuck) &&
+           ReadVector3(pawn, tg::g_pawnViewAngle, out.pitch, out.yaw, out.roll) &&
+           ReadVector3(node, tg::g_nodeAbsOrigin, out.originX, out.originY, out.originZ);
 }
 
 // ---- recording ----
@@ -329,14 +326,18 @@ bool StartRecord(int slot)
         std::lock_guard<std::mutex> lk(r.mu);
         r.ticks.clear();
         r.subs.clear();
+        r.commands.clear();
         r.pendingSubs.clear();
+        r.pendingCommand = {};
+        r.havePendingCommand = false;
         r.havePre = false;
-        r.pendingEventFlags = ReplayEvent_None;
+        r.pendingEventFlags = ReplayEventNone;
         r.pendingDropEvent = {};
         r.pendingDropEvent.weaponDefIndex = -1;
         r.pendingDropCandidates.clear();
         r.ticks.reserve(4096); // ~64s @ 64 tick
         r.subs.reserve(4096);
+        r.commands.reserve(4096);
     }
     r.currentDef.store(-1, std::memory_order_relaxed);
     r.liveWs.store(nullptr, std::memory_order_relaxed);
@@ -367,6 +368,15 @@ int RecordedSubtickCount(int slot)
     RecordState& r = g_rec[slot];
     std::lock_guard<std::mutex> lk(r.mu);
     return static_cast<int>(r.subs.size());
+}
+
+// Returns the number of complete command frames captured for a slot
+int RecordedCommandCount(int slot)
+{
+    if (!ValidSlot(slot)) return -1;
+    RecordState& r = g_rec[slot];
+    std::lock_guard<std::mutex> lk(r.mu);
+    return static_cast<int>(r.commands.size());
 }
 
 void SetLiveWs(int slot, void* ws)
@@ -408,6 +418,17 @@ void OnCaptureSubticks(int slot, const SubtickMove* moves, int count)
         r.pendingSubs.push_back(moves[i]);
 }
 
+// Stashes the command frame until the matching movement tick is committed
+void OnCaptureCommand(int slot, const ReplayCommandFrameData& command)
+{
+    if (!ValidSlot(slot)) return;
+    RecordState& r = g_rec[slot];
+    if (!r.recording.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.pendingCommand = command;
+    r.havePendingCommand = true;
+}
+
 void OnCapturePost(int slot, void* services, void* cmd)
 {
     // cmd is actually the CMoveData* (hook passes moveData here)
@@ -420,24 +441,24 @@ void OnCapturePost(int slot, void* services, void* cmd)
 
     if (cmd)
     {
-        ReadVector3(cmd, tg::kMove_AbsOrigin, post.originX, post.originY, post.originZ);
+        ReadVector3(cmd, tg::g_moveAbsOrigin, post.originX, post.originY, post.originZ);
     }
 
     // Active weapon def for this tick.
     void* ws = r.liveWs.load(std::memory_order_relaxed);
-    int def = WeaponLockerHooks::ActiveWeaponDef(ws);
+    int def = weapon_locker_hooks::ActiveWeaponDef(ws);
     if (def < 0) def = r.currentDef.load(std::memory_order_relaxed);
     if (def >= 0) r.currentDef.store(def, std::memory_order_relaxed);
 
-    uint32_t nSub;
+    uint32_t subtickCount;
     {
         std::lock_guard<std::mutex> lk(r.mu);
         for (size_t i = 0; i < r.pendingDropCandidates.size();)
         {
             const RecordState::DropCandidate& candidate = r.pendingDropCandidates[i];
-            if (WeaponLockerHooks::FindWeaponByDef(ws, candidate.event.weaponDefIndex) != candidate.weapon)
+            if (weapon_locker_hooks::FindWeaponByDef(ws, candidate.event.weaponDefIndex) != candidate.weapon)
             {
-                r.pendingEventFlags |= ReplayEvent_Drop;
+                r.pendingEventFlags |= ReplayEventDrop;
                 r.pendingDropEvent = candidate.event;
                 g_dropHookPhysicalDropCount.fetch_add(1, std::memory_order_relaxed);
                 g_dropCaptureCount.fetch_add(1, std::memory_order_relaxed);
@@ -453,8 +474,8 @@ void OnCapturePost(int slot, void* services, void* cmd)
         t.pre = r.havePre ? r.pendingPre : post;
         t.post = post;
         t.weaponDefIndex = def;
-        nSub = static_cast<uint32_t>(r.pendingSubs.size());
-        t.numSubtick = nSub;
+        subtickCount = static_cast<uint32_t>(r.pendingSubs.size());
+        t.numSubtick = subtickCount;
         t.eventFlags = r.pendingEventFlags;
         t.eventWeaponDefIndex = r.pendingDropEvent.weaponDefIndex;
         t.eventDropVectorFlags = r.pendingDropEvent.vectorFlags;
@@ -467,9 +488,12 @@ void OnCapturePost(int slot, void* services, void* cmd)
         for (const auto& sm : r.pendingSubs)
             r.subs.push_back(sm);
         r.ticks.push_back(t);
+        r.commands.push_back(r.havePendingCommand ? r.pendingCommand : ReplayCommandFrameData{});
         r.pendingSubs.clear();
+        r.pendingCommand = {};
+        r.havePendingCommand = false;
         r.havePre = false;
-        r.pendingEventFlags = ReplayEvent_None;
+        r.pendingEventFlags = ReplayEventNone;
         r.pendingDropEvent = {};
         r.pendingDropEvent.weaponDefIndex = -1;
     }
@@ -496,6 +520,19 @@ int CopySubticks(int slot, SubtickMove* out, int maxSubticks)
     if (n > maxSubticks) n = maxSubticks;
     for (int i = 0; i < n; ++i)
         out[i] = r.subs[i];
+    return n;
+}
+
+// Copies captured command frames into a caller-owned buffer
+int CopyCommands(int slot, ReplayCommandFrameData* out, int maxCommands)
+{
+    if (!ValidSlot(slot) || !out || maxCommands <= 0) return 0;
+    RecordState& r = g_rec[slot];
+    std::lock_guard<std::mutex> lk(r.mu);
+    int n = static_cast<int>(r.commands.size());
+    if (n > maxCommands) n = maxCommands;
+    for (int i = 0; i < n; ++i)
+        out[i] = r.commands[i];
     return n;
 }
 
@@ -590,7 +627,7 @@ bool StartReplay(int slot, bool loop)
     }
     p.loop.store(loop, std::memory_order_relaxed);
     p.playing.store(true, std::memory_order_release);
-    InputInjector::ClearUsercmdInjections(slot);
+    input_injector::ClearUsercmdInjections(slot);
     return true;
 }
 
@@ -598,7 +635,7 @@ bool StopReplay(int slot)
 {
     if (!ValidSlot(slot)) return false;
     g_rep[slot].playing.store(false, std::memory_order_release);
-    InputInjector::ClearReplayPawn(slot);
+    input_injector::ClearReplayPawn(slot);
     return true;
 }
 
@@ -632,6 +669,80 @@ bool CurrentReplayTick(int slot, ReplayTick& out)
     if (idx < 0) idx = 0;
     if (idx >= total) return false;
     out = p.ticks[idx];
+    return true;
+}
+
+// Assembles one complete PlayerRunCommand input frame from parallel replay buffers
+bool ReplayCommandFrameForSimulation(int slot, ReplayCommandFrame& out)
+{
+    out = {};
+    out.weaponSelect = -1;
+    out.rawWeaponSelect = -1;
+    if (!ValidSlot(slot)) return false;
+
+    ReplayState& p = g_rep[slot];
+    if (!p.playing.load(std::memory_order_acquire)) return false;
+
+    int recordedDef = -1;
+    {
+        std::lock_guard<std::mutex> lk(p.mu);
+        const int total = static_cast<int>(p.ticks.size());
+        const int cur = p.cursor.load(std::memory_order_relaxed);
+        if (cur < 0 || cur >= total || p.subOffset.size() != p.ticks.size() + 1) return false;
+
+        out.tick = p.ticks[static_cast<size_t>(cur)];
+        recordedDef = out.tick.weaponDefIndex;
+        out.commandView = out.tick.pre;
+        out.buttons0 = out.tick.pre.buttons;
+        out.buttons1 = out.tick.pre.buttons1;
+        out.buttons2 = out.tick.pre.buttons2;
+
+        const ReplayCommandFrameData* command =
+            static_cast<size_t>(cur) < p.commands.size() ? &p.commands[static_cast<size_t>(cur)] : nullptr;
+        const bool hasCommandButtons = command && (command->fields & kCommandFieldButtons) != 0;
+        if (hasCommandButtons)
+        {
+            out.buttons0 = command->buttons;
+            out.buttons1 = command->buttons1;
+            out.buttons2 = command->buttons2;
+        }
+        else if (out.buttons1 == 0 && out.buttons2 == 0)
+        {
+            const uint64_t heldPrev = cur > 0 ? p.ticks[static_cast<size_t>(cur - 1)].pre.buttons : 0;
+            out.buttons1 = out.buttons0 & ~heldPrev;
+            out.buttons2 = heldPrev & ~out.buttons0;
+        }
+
+        if (command)
+        {
+            out.commandFields = command->fields;
+            if ((command->fields & kCommandFieldViewAngles) != 0)
+            {
+                out.commandView.pitch = command->pitch;
+                out.commandView.yaw = command->yaw;
+                out.commandView.roll = command->roll;
+            }
+            if ((command->fields & kCommandFieldForwardMove) != 0) out.forwardMove = command->forwardMove;
+            if ((command->fields & kCommandFieldLeftMove) != 0) out.leftMove = command->leftMove;
+            if ((command->fields & kCommandFieldUpMove) != 0) out.upMove = command->upMove;
+            if ((command->fields & kCommandFieldMouse) != 0)
+            {
+                out.mouseDx = command->mouseDx;
+                out.mouseDy = command->mouseDy;
+            }
+            if ((command->fields & kCommandFieldWeaponSelect) != 0) out.rawWeaponSelect = command->weaponSelect;
+            if ((command->fields & kCommandFieldLeftHand) != 0) out.leftHandDesired = command->leftHandDesired;
+        }
+
+        const uint32_t begin = p.subOffset[static_cast<size_t>(cur)];
+        const uint32_t end = p.subOffset[static_cast<size_t>(cur) + 1];
+        if (begin > end || end > p.subs.size()) return false;
+        out.subtickCount = static_cast<int32_t>(end - begin);
+        for (int i = 0; i < out.subtickCount; ++i)
+            out.subticks[i] = p.subs[static_cast<size_t>(begin) + static_cast<size_t>(i)];
+    }
+
+    out.weaponSelect = ReplayWeaponSelectForDef(slot, recordedDef);
     return true;
 }
 
@@ -691,21 +802,21 @@ bool CurrentReplayInputButtons(int slot, uint64_t& b0, uint64_t& b1, uint64_t& b
 bool SwitchBotWeaponByDef(int slot, int defIndex)
 {
     if (!ValidSlot(slot) || defIndex < 0 || IsReplaying(slot)) return false;
-    if (!WeaponLockerHooks::WeaponHooksReady()) return false;
-    void* ws = WeaponLockerHooks::WsForSlot(slot);
+    if (!weapon_locker_hooks::WeaponHooksReady()) return false;
+    void* ws = weapon_locker_hooks::WsForSlot(slot);
     if (!ws) return false;
-    void* weapon = WeaponLockerHooks::FindWeaponByDef(ws, defIndex);
+    void* weapon = weapon_locker_hooks::FindWeaponByDef(ws, defIndex);
     if (!weapon) return false;
-    return WeaponLockerHooks::SelectWeaponRaw(ws, weapon);
+    return weapon_locker_hooks::SelectWeaponRaw(ws, weapon);
 }
 
 // Def index of the bot's current active weapon
 int BotActiveWeaponDef(int slot)
 {
-    if (!ValidSlot(slot) || !WeaponLockerHooks::WeaponHooksReady()) return -1;
-    void* ws = WeaponLockerHooks::WsForSlot(slot);
+    if (!ValidSlot(slot) || !weapon_locker_hooks::WeaponHooksReady()) return -1;
+    void* ws = weapon_locker_hooks::WsForSlot(slot);
     if (!ws) return -1;
-    return WeaponLockerHooks::ActiveWeaponDef(ws);
+    return weapon_locker_hooks::ActiveWeaponDef(ws);
 }
 
 // Treats CT and T fire grenades as the same replay weapon type
@@ -727,19 +838,17 @@ int CurrentReplayWeaponDef(int slot)
     return p.ticks[cur].weaponDefIndex;
 }
 
-int CurrentReplayWeaponSelect(int slot)
+// Resolves and applies the recorded weapon definition for one command frame
+static int ReplayWeaponSelectForDef(int slot, int recordedDef)
 {
-    if (!ValidSlot(slot) || !WeaponLockerHooks::WeaponHooksReady()) return -1;
-
-    // Recorded def for the tick about to be simulated
-    int recordedDef = CurrentReplayWeaponDef(slot);
+    if (!ValidSlot(slot) || !weapon_locker_hooks::WeaponHooksReady()) return -1;
     if (recordedDef < 0) return -1;
 
-    void* ws = WeaponLockerHooks::WsForSlot(slot);
+    void* ws = weapon_locker_hooks::WsForSlot(slot);
     if (!ws) return -1;
 
     // Already holding the recorded weapon -> no switch
-    if (ReplayWeaponDefsMatch(WeaponLockerHooks::ActiveWeaponDef(ws), recordedDef))
+    if (ReplayWeaponDefsMatch(weapon_locker_hooks::ActiveWeaponDef(ws), recordedDef))
     {
         g_rep[slot].lastAppliedDef.store(recordedDef, std::memory_order_relaxed);
         return -1;
@@ -747,10 +856,13 @@ int CurrentReplayWeaponSelect(int slot)
 
     void* weapon = FindReplayWeaponByDef(ws, recordedDef);
     if (!weapon) return -1;
-    WeaponLockerHooks::SelectWeaponRaw(ws, weapon);
+    weapon_locker_hooks::SelectWeaponRaw(ws, weapon);
     g_rep[slot].lastAppliedDef.store(recordedDef, std::memory_order_relaxed);
-    return WeaponLockerHooks::WeaponEntIndex(weapon);
+    return weapon_locker_hooks::WeaponEntIndex(weapon);
 }
+
+// Resolves the current tick's recorded weapon to a live entity index
+int CurrentReplayWeaponSelect(int slot) { return ReplayWeaponSelectForDef(slot, CurrentReplayWeaponDef(slot)); }
 
 // Returns the current drop event only once for each replay cursor
 bool TakeCurrentReplayDrop(int slot, ReplayDropEvent& event)
@@ -767,7 +879,7 @@ bool TakeCurrentReplayDrop(int slot, ReplayDropEvent& event)
     p.lastEventCursor = cur;
 
     const ReplayTick& tick = p.ticks[cur];
-    if ((tick.eventFlags & ReplayEvent_Drop) == 0) return false;
+    if ((tick.eventFlags & ReplayEventDrop) == 0) return false;
     event.weaponDefIndex = tick.eventWeaponDefIndex;
     event.vectorFlags = tick.eventDropVectorFlags;
     event.target[0] = tick.eventDropTargetX;
@@ -783,30 +895,28 @@ bool TakeCurrentReplayDrop(int slot, ReplayDropEvent& event)
 bool DropReplayEventWeapon(int slot, void* services, const ReplayDropEvent& event)
 {
     const int weaponDefIndex = event.weaponDefIndex;
-    if (!ValidSlot(slot) || !services || weaponDefIndex < 0 || !IsReplaying(slot) ||
-        !WeaponLockerHooks::WeaponHooksReady())
-        return false;
+    if (!ValidSlot(slot) || !services || weaponDefIndex < 0 || !IsReplaying(slot) || !weapon_locker_hooks::WeaponHooksReady()) return false;
 
     g_dropReplayAttemptCount.fetch_add(1, std::memory_order_relaxed);
     g_lastDropReplaySlot.store(slot, std::memory_order_relaxed);
     g_lastDropReplayWeaponDef.store(weaponDefIndex, std::memory_order_relaxed);
     g_lastDropReplayVectorFlags.store(event.vectorFlags, std::memory_order_relaxed);
 
-    void* pawn = InputInjector::ResolveReplayPawn(slot, services);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     void* ws = nullptr;
-    if (!pawn || !GuardedRead(pawn, tg::kPawn_WeaponServices, ws) || !ws) return false;
-    void* weapon = WeaponLockerHooks::FindWeaponByDef(ws, weaponDefIndex);
+    if (!pawn || !GuardedRead(pawn, tg::g_pawnWeaponServices, ws) || !ws) return false;
+    void* weapon = weapon_locker_hooks::FindWeaponByDef(ws, weaponDefIndex);
     if (!weapon) return false;
-    if (WeaponLockerHooks::ActiveWeaponDef(ws) != weaponDefIndex && !WeaponLockerHooks::SelectWeaponRaw(ws, weapon)) return false;
-    if (WeaponLockerHooks::ActiveWeaponDef(ws) != weaponDefIndex) return false;
+    if (weapon_locker_hooks::ActiveWeaponDef(ws) != weaponDefIndex && !weapon_locker_hooks::SelectWeaponRaw(ws, weapon)) return false;
+    if (weapon_locker_hooks::ActiveWeaponDef(ws) != weaponDefIndex) return false;
 
-    if (!Dispatch::g_pGameClients) return false;
+    if (!dispatch::g_gameClients) return false;
     CCommand command;
     if (!command.Tokenize("drop")) return false;
 
     g_activeReplayDropSlot = slot;
     g_activeReplayDropEvent = &event;
-    Dispatch::g_pGameClients->ClientCommand(CPlayerSlot(slot), command);
+    dispatch::g_gameClients->ClientCommand(CPlayerSlot(slot), command);
     g_activeReplayDropEvent = nullptr;
     g_activeReplayDropSlot = -1;
     g_dropReplayNativeCallCount.fetch_add(1, std::memory_order_relaxed);
@@ -885,40 +995,83 @@ uint32_t LastDropReplayVectorFlags() { return g_lastDropReplayVectorFlags.load(s
 // Write replay velocity onto the pawn. View replay is driven by SetEyeAngles.
 static void WriteVelocityToPawn(int slot, void* services, const MovementSnapshot& s)
 {
-    void* pawn = InputInjector::ResolveReplayPawn(slot, services);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
-    WriteVector3(pawn, tg::kEnt_AbsVelocity, s.velX, s.velY, s.velZ);
+    WriteVector3(pawn, tg::g_entAbsVelocity, s.velX, s.velY, s.velZ);
 }
 
 // Writes replay origin through the current body-component scene node.
 static void WriteSceneNodeOrigin(int slot, void* services, const MovementSnapshot& s, float zBias = 0.0f)
 {
-    void* pawn = InputInjector::ResolveReplayPawn(slot, services);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
 
     void* node = ResolveSceneNode(pawn);
     if (!node) return;
 
     const float values[3] = { s.originX, s.originY, s.originZ + zBias };
-    TryWriteMemoryGuarded(node, tg::kNode_AbsOrigin, values, sizeof(values));
+    TryWriteMemoryGuarded(node, tg::g_nodeAbsOrigin, values, sizeof(values));
 }
 
 // Write origin + velocity into CMoveData.
 static void WriteMoveData(void* moveData, const MovementSnapshot& s)
 {
-    WriteVector3(moveData, tg::kMove_AbsOrigin, s.originX, s.originY, s.originZ);
-    WriteVector3(moveData, tg::kMove_Velocity, s.velX, s.velY, s.velZ);
+    WriteVector3(moveData, tg::g_moveAbsOrigin, s.originX, s.originY, s.originZ);
+    WriteVector3(moveData, tg::g_moveVelocity, s.velX, s.velY, s.velZ);
 }
 
 // Restores duck and ladder state through guarded field writes.
 static void WriteMovementServiceState(void* services, const MovementSnapshot& s)
 {
-    WriteField(services, tg::kServices_DuckAmount, s.duckAmount);
-    WriteField(services, tg::kServices_DuckSpeed, s.duckSpeed);
-    WriteVector3(services, tg::kServices_LadderNormal, s.ladderNormalX, s.ladderNormalY, s.ladderNormalZ);
-    WriteField(services, tg::kServices_Ducked, s.ducked);
-    WriteField(services, tg::kServices_Ducking, s.ducking);
-    WriteField(services, tg::kServices_DesiresDuck, s.desiresDuck);
+    WriteField(services, tg::g_servicesDuckAmount, s.duckAmount);
+    WriteField(services, tg::g_servicesDuckSpeed, s.duckSpeed);
+    WriteVector3(services, tg::g_servicesLadderNormal, s.ladderNormalX, s.ladderNormalY, s.ladderNormalZ);
+    WriteField(services, tg::g_servicesDucked, s.ducked);
+    WriteField(services, tg::g_servicesDucking, s.ducking);
+    WriteField(services, tg::g_servicesDesiresDuck, s.desiresDuck);
+}
+
+// Normalizes replay yaw to the engine's signed degree range
+static float NormalizeReplayYaw(float yaw)
+{
+    yaw = std::fmod(yaw + 180.0f, 360.0f);
+    if (yaw < 0.0f) yaw += 360.0f;
+    return yaw - 180.0f;
+}
+
+// Writes command view angles to the pawn fields read before movement processing
+static void WriteRawViewAnglesToPawn(void* pawn, float pitch, float yaw)
+{
+    const float normalizedYaw = NormalizeReplayYaw(yaw);
+    WriteVector3(pawn, tg::g_pawnViewAngle, pitch, normalizedYaw, 0.0f);
+    WriteVector3(pawn, tg::g_pawnEyeAngles, pitch, normalizedYaw, 0.0f);
+}
+
+// Keeps the pawn and movement-service view history aligned with the command
+static void WriteReplayViewHistory(void* services, void* pawn, float pitch, float yaw)
+{
+    const float normalizedYaw = NormalizeReplayYaw(yaw);
+    WriteVector3(pawn, tg::g_pawnViewAnglePrevious, pitch, normalizedYaw, 0.0f);
+    WriteVector3(services, tg::g_servicesOldViewAngles, pitch, normalizedYaw, 0.0f);
+}
+
+// Seeds pawn state before weapon and grenade code consumes the replayed command
+void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const MovementSnapshot& commandView)
+{
+    if (!ValidSlot(slot) || !services || !g_rep[slot].playing.load(std::memory_order_acquire)) return;
+
+    WriteVelocityToPawn(slot, services, tick.pre);
+    WriteMovementServiceState(services, tick.pre);
+
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
+    if (!pawn) return;
+
+    WriteField(pawn, tg::g_entMoveType, tick.pre.moveType);
+    WriteField(pawn, tg::g_entActualMoveType, tick.pre.actualMoveType);
+    WriteSceneNodeOrigin(slot, services, tick.pre);
+    bot_controller_hooks::ApplyReplayEyeAngles(pawn, commandView.pitch, commandView.yaw);
+    WriteRawViewAnglesToPawn(pawn, commandView.pitch, commandView.yaw);
+    WriteReplayViewHistory(services, pawn, commandView.pitch, commandView.yaw);
 }
 
 // ProcessMovement (pre): seed CMoveData + pawn + moveType with pre state.
@@ -939,15 +1092,15 @@ void OnReplayPre(int slot, void* services, void* moveData)
     WriteVelocityToPawn(slot, services, t.pre);
     WriteMovementServiceState(services, t.pre);
     // Feed recorded buttons so the engine's Duck()/ladder logic runs
-    WriteField(services, tg::kServices_Buttons, t.pre.buttons);
-    WriteField(services, tg::kServices_Buttons1, t.pre.buttons1);
-    WriteField(services, tg::kServices_Buttons2, t.pre.buttons2);
-    void* pawn = InputInjector::ResolveReplayPawn(slot, services);
+    WriteField(services, tg::g_servicesButtons, t.pre.buttons);
+    WriteField(services, tg::g_servicesButtons1, t.pre.buttons1);
+    WriteField(services, tg::g_servicesButtons2, t.pre.buttons2);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (pawn)
     {
-        WriteField(pawn, tg::kEnt_MoveType, t.pre.moveType);
+        WriteField(pawn, tg::g_entMoveType, t.pre.moveType);
         WriteSceneNodeOrigin(slot, services, t.pre);
-        BotControllerHooks::ApplyReplayEyeAngles(pawn, t.pre.pitch, t.pre.yaw);
+        bot_controller_hooks::ApplyReplayEyeAngles(pawn, t.pre.pitch, t.pre.yaw);
     }
 }
 
@@ -991,26 +1144,26 @@ void OnReplayCommit(int slot, void* services)
                 return;
             }
             p.playing.store(false, std::memory_order_release);
-            InputInjector::ClearReplayPawn(slot);
+            input_injector::ClearReplayPawn(slot);
             return;
         }
         t = p.ticks[cur];
     }
 
-    void* pawn = InputInjector::ResolveReplayPawn(slot, services);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (pawn)
     {
-        WriteField(pawn, tg::kEnt_MoveType, t.post.moveType);
-        WriteField(pawn, tg::kEnt_ActualMoveType, t.post.actualMoveType);
+        WriteField(pawn, tg::g_entMoveType, t.post.moveType);
+        WriteField(pawn, tg::g_entActualMoveType, t.post.actualMoveType);
         // Merge ground + ducking bits from the recording, keep the rest live.
         uint32_t live = 0;
-        uint32_t mask = tg::kFL_OnGround | tg::kFL_Ducking;
-        if (SafeRead(pawn, tg::kEnt_Flags, live))
+        uint32_t mask = tg::kFlOnGround | tg::kFlDucking;
+        if (SafeRead(pawn, tg::g_entFlags, live))
         {
             live = (live & ~mask) | (t.post.entityFlags & mask);
-            WriteField(pawn, tg::kEnt_Flags, live);
+            WriteField(pawn, tg::g_entFlags, live);
         }
-        BotControllerHooks::ApplyReplayEyeAngles(pawn, t.post.pitch, t.post.yaw);
+        bot_controller_hooks::ApplyReplayEyeAngles(pawn, t.post.pitch, t.post.yaw);
     }
 
     WriteVelocityToPawn(slot, services, t.post);
@@ -1035,9 +1188,12 @@ void ClearAll()
             std::lock_guard<std::mutex> lk(g_rec[i].mu);
             g_rec[i].ticks.clear();
             g_rec[i].subs.clear();
+            g_rec[i].commands.clear();
             g_rec[i].pendingSubs.clear();
+            g_rec[i].pendingCommand = {};
+            g_rec[i].havePendingCommand = false;
             g_rec[i].havePre = false;
-            g_rec[i].pendingEventFlags = ReplayEvent_None;
+            g_rec[i].pendingEventFlags = ReplayEventNone;
             g_rec[i].pendingDropEvent = {};
             g_rec[i].pendingDropEvent.weaponDefIndex = -1;
             g_rec[i].pendingDropCandidates.clear();
@@ -1055,8 +1211,8 @@ void ClearAll()
         g_rec[i].liveWs.store(nullptr, std::memory_order_relaxed);
         g_rep[i].cursor.store(0, std::memory_order_relaxed);
         g_rep[i].lastAppliedDef.store(-1, std::memory_order_relaxed);
-        InputInjector::ClearReplayPawn(i);
+        input_injector::ClearReplayPawn(i);
     }
 }
-} // namespace MotionRecorder
-} // namespace BotController
+} // namespace motion_recorder
+} // namespace bot_controller

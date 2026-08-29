@@ -157,6 +157,7 @@ add_library(
     src/common/schema_resolver.cpp
     src/common/version_targets.cpp
     src/common/platform.cpp
+    src/ProjectileBirthAlign/ProjectileBirthAlign.cpp
     src/common/ccsbot_slot.cpp
     src/common/dispatch.cpp
     src/common/commands.cpp
@@ -174,6 +175,7 @@ target_include_directories(
     src/BotController
     src/BuyController
     src/BotRecorder
+    src/ProjectileBirthAlign
     src/VoiceSender
     src/BotProfile
     ${CMAKE_SOURCE_DIR}/third_party

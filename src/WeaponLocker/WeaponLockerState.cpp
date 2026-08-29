@@ -5,8 +5,8 @@
 #include <array>
 #include <atomic>
 
-namespace BotController {
-namespace WeaponLockerState {
+namespace bot_controller {
+namespace weapon_locker_state {
 static std::array<std::atomic<int>, kMaxSlots> g_locks{};
 
 LockTarget Get(int slot)
@@ -36,5 +36,5 @@ int CountLocked()
         if (x.load(std::memory_order_relaxed) != 0) ++n;
     return n;
 }
-} // namespace WeaponLockerState
-} // namespace BotController
+} // namespace weapon_locker_state
+} // namespace bot_controller

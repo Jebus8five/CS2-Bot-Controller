@@ -20,9 +20,9 @@
 #include <unistd.h>
 #endif
 
-namespace tg = BotController::targets;
+namespace tg = bot_controller::targets;
 
-namespace BotController {
+namespace bot_controller {
 static int EntIndexFromHandle(uint32_t h)
 {
     if (h == 0u || h == 0xFFFFFFFFu) return -1;
@@ -129,8 +129,8 @@ PawnControllerHandles ReadPawnControllerHandles(void* pawn)
 
     if (!pawn) return out;
 
-    if (!GuardedRead(pawn, tg::kPawn_Controller, out.controllerHandle) ||
-        !GuardedRead(pawn, tg::kPawn_OriginalController, out.originalControllerHandle))
+    if (!GuardedRead(pawn, tg::g_pawnController, out.controllerHandle) ||
+        !GuardedRead(pawn, tg::g_pawnOriginalController, out.originalControllerHandle))
         return out;
     out.controllerIndex = EntIndexFromHandle(out.controllerHandle);
     out.originalControllerIndex = EntIndexFromHandle(out.originalControllerHandle);
@@ -145,16 +145,16 @@ SlotResolution ResolveSlot(void* bot)
     if (!bot) return out;
 
     void* pawn = nullptr;
-    if (!GuardedRead(bot, tg::kBot_Pawn, pawn)) return out;
+    if (!GuardedRead(bot, tg::g_botPawn, pawn)) return out;
     if (!pawn) return out;
     out.pawn = pawn;
 
     void* identity = nullptr;
-    if (!GuardedRead(pawn, tg::kEnt_Identity, identity)) return out;
+    if (!GuardedRead(pawn, tg::g_entIdentity, identity)) return out;
     if (!identity) return out;
 
     uint32_t handle = 0;
-    if (!GuardedRead(identity, tg::kEntIdentity_EHandle, handle)) return out;
+    if (!GuardedRead(identity, tg::g_entIdentityEHandle, handle)) return out;
     out.pawnEntIndex = EntIndexFromHandle(handle);
     if (out.pawnEntIndex <= 0) return out;
 
@@ -192,12 +192,12 @@ int ControllerToSlot(void* controller)
 {
     if (!controller) return -1;
     void* identity = nullptr;
-    if (!GuardedRead(controller, tg::kEnt_Identity, identity)) return -1;
+    if (!GuardedRead(controller, tg::g_entIdentity, identity)) return -1;
     if (!identity) return -1;
     uint32_t h = 0;
-    if (!GuardedRead(identity, tg::kEntIdentity_EHandle, h)) return -1;
+    if (!GuardedRead(identity, tg::g_entIdentityEHandle, h)) return -1;
     int idx = EntIndexFromHandle(h);
     if (idx < 1 || idx > 64) return -1;
     return idx - 1;
 }
-} // namespace BotController
+} // namespace bot_controller

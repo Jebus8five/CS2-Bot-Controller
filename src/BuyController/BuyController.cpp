@@ -16,13 +16,13 @@
 #include <cstdio>
 #include <string>
 
-namespace tg = BotController::targets;
+namespace tg = bot_controller::targets;
 
-using BuyUpdate_t = void(BC_FASTCALL*)(void* self, void* me);
+using BuyUpdateT = void(BC_FASTCALL*)(void* self, void* me);
 
-namespace BotController {
-namespace BuyControllerHooks {
-static BuyUpdate_t g_origOnUpdate = nullptr;
+namespace bot_controller {
+namespace buy_controller_hooks {
+static BuyUpdateT g_origOnUpdate = nullptr;
 static void* g_addrOnUpdate = nullptr;
 static Hook g_hookOnUpdate;
 static bool g_installed = false;
@@ -34,19 +34,19 @@ static uint8_t g_lastInitDelay[64] = { 0 };
 // Run "buy <alias>" server-side for a bot slot
 static void IssueBuy(int slot, const char* alias)
 {
-    if (!Dispatch::g_pGameClients || slot < 0 || slot >= 64) return;
+    if (!dispatch::g_gameClients || slot < 0 || slot >= 64) return;
     char line[128];
     std::snprintf(line, sizeof(line), "buy %s", alias);
     CCommand cmd;
     if (!cmd.Tokenize(line)) return;
-    Dispatch::g_pGameClients->ClientCommand(CPlayerSlot(slot), cmd);
+    dispatch::g_gameClients->ClientCommand(CPlayerSlot(slot), cmd);
 }
 
 // Execute a slot's whole plan in one tick, then mark vanilla done
 static void ApplyPlan(void* self, int slot)
 {
     BuyPlan plan;
-    if (!BuyControllerState::Copy(slot, plan)) return;
+    if (!buy_controller_state::Copy(slot, plan)) return;
 
     if (!plan.skip)
         for (const auto& alias : plan.items)
@@ -54,17 +54,17 @@ static void ApplyPlan(void* self, int slot)
 
     // Tell vanilla buying is finished so it stops here and exits state
     const uint8_t done = 1;
-    WriteField(self, tg::kBuy_DoneBuying, done);
+    WriteField(self, tg::g_buyDoneBuying, done);
 }
 
 static void BC_FASTCALL HookedOnUpdate(void* self, void* me)
 {
     int slot = CCSBotToSlot(me);
-    if (slot >= 0 && slot < 64 && MotionRecorder::IsReplaying(slot)) return;
-    if (slot < 0 || slot >= 64 || !BuyControllerState::HasPlan(slot)) return g_origOnUpdate(self, me);
+    if (slot >= 0 && slot < 64 && motion_recorder::IsReplaying(slot)) return;
+    if (slot < 0 || slot >= 64 || !buy_controller_state::HasPlan(slot)) return g_origOnUpdate(self, me);
 
     uint8_t init = 0;
-    if (!SafeRead(self, tg::kBuy_InitialDelay, init)) return g_origOnUpdate(self, me);
+    if (!SafeRead(self, tg::g_buyInitialDelay, init)) return g_origOnUpdate(self, me);
     // Rising edge of m_isInitialDelay = freshly entered BuyState this round
     if (init && !g_lastInitDelay[slot]) ApplyPlan(self, slot);
     g_lastInitDelay[slot] = init;
@@ -72,9 +72,9 @@ static void BC_FASTCALL HookedOnUpdate(void* self, void* me)
     g_origOnUpdate(self, me);
 }
 
-bool Install(const nlohmann::json& gd, const Sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
+bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
 {
-    g_addrOnUpdate = Sig::ResolveSig(gd, serverModule, "BuyState::OnUpdate", errorOut, errorOutLen);
+    g_addrOnUpdate = sig::ResolveSig(gd, serverModule, "BuyState::OnUpdate", errorOut, errorOutLen);
     if (!g_addrOnUpdate)
     {
         g_status = "failed: OnUpdate sig";
@@ -109,5 +109,5 @@ void Remove()
 
 const char* Status() { return g_status.c_str(); }
 void* OnUpdateAddress() { return g_addrOnUpdate; }
-} // namespace BuyControllerHooks
-} // namespace BotController
+} // namespace buy_controller_hooks
+} // namespace bot_controller
