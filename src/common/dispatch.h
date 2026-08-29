@@ -9,7 +9,7 @@ class ISource2GameClients;
 
 namespace bot_controller {
 // Mirror BotControllerApi.LockKind on the C# side.
-enum class LockKind : int
+enum class LockKind : int // NOLINT(performance-enum-size)
 {
     All = 0,
     Aim = 1,

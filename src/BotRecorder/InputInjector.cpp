@@ -3,6 +3,8 @@
 // FinishMove (replay post into MoveData + commit)
 // PlayerRunCommand(subtick record + re-inject)
 
+#include "networkbasetypes.pb.h"
+#include "nlohmann/json.hpp" // NOLINT(misc-include-cleaner)
 #include "playercommand.h"
 
 #include "InputInjector.h"
@@ -10,10 +12,11 @@
 #include "sig_scan.h"
 #include "MotionRecorder.h"
 #include "ProjectileBirthAlign.h"
+#include "usercmd.pb.h"
 #include "version_targets.h"
 #include "hook.h"
 
-#include <algorithm>
+#include <algorithm> // NOLINT(misc-include-cleaner)
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -21,7 +24,8 @@
 #include <cmath>
 #include <cstdio>
 #include <mutex>
-#include <vector>
+#include <string>
+#include <vector> // NOLINT(misc-include-cleaner)
 
 #include <tier0/dbg.h>
 
@@ -34,39 +38,41 @@ using PhysicsSimulateT = void(BC_FASTCALL*)(void* controller);
 
 namespace bot_controller {
 namespace input_injector {
-constexpr float kUsercmdKeyboardMoveScale = 450.0f;
-constexpr uint64_t kInForward = 1ull << 3;
-constexpr uint64_t kInBack = 1ull << 4;
-constexpr uint64_t kInMoveLeft = 1ull << 9;
-constexpr uint64_t kInMoveRight = 1ull << 10;
+
+namespace {
+constexpr float kUsercmdKeyboardMoveScale = 450.0F;
+constexpr uint64_t kInForward = 1ULL << 3;
+constexpr uint64_t kInBack = 1ULL << 4;
+constexpr uint64_t kInMoveLeft = 1ULL << 9;
+constexpr uint64_t kInMoveRight = 1ULL << 10;
 constexpr uint64_t kMovementButtonMask = kInForward | kInBack | kInMoveLeft | kInMoveRight;
 
-static ProcessMovementT g_origProcessMovement = nullptr;
-static FinishMoveT g_origFinishMove = nullptr;
-static PlayerRunCommandT g_origPlayerRunCommand = nullptr;
-static PhysicsSimulateT g_origPhysicsSimulate = nullptr;
+ProcessMovementT g_origProcessMovement = nullptr;
+FinishMoveT g_origFinishMove = nullptr;
+PlayerRunCommandT g_origPlayerRunCommand = nullptr;
+PhysicsSimulateT g_origPhysicsSimulate = nullptr;
 
-static void* g_addrProcessMovement = nullptr;
-static void* g_addrFinishMove = nullptr;
-static void* g_addrPlayerRunCommand = nullptr;
-static void* g_addrPhysicsSimulate = nullptr;
+void* g_addrProcessMovement = nullptr;
+void* g_addrFinishMove = nullptr;
+void* g_addrPlayerRunCommand = nullptr;
+void* g_addrPhysicsSimulate = nullptr;
 
-static Hook g_hookProcessMovement;
-static Hook g_hookFinishMove;
-static Hook g_hookPlayerRunCommand;
-static Hook g_hookPhysicsSimulate;
-static bool g_installed = false;
+Hook g_hookProcessMovement;
+Hook g_hookFinishMove;
+Hook g_hookPlayerRunCommand;
+Hook g_hookPhysicsSimulate;
+bool g_installed = false;
 // True once PhysicsSimulate is hooked
-static bool g_physicsActive = false;
+bool g_physicsActive = false;
 // True once PlayerRunCommand is hooked
-static bool g_subtickActive = false;
-static std::string g_status = "not_attempted";
+bool g_subtickActive = false;
+std::string g_status = "not_attempted"; // NOLINT(bugprone-throwing-static-initialization)
 
 // slot -> live CCSPlayer_MovementServices*
-static std::array<std::atomic<void*>, kMaxSlots> g_slotServices{};
-static std::array<std::atomic<void*>, kMaxSlots> g_slotPawns{};
+std::array<std::atomic<void*>, kMaxSlots> g_slotServices{};
+std::array<std::atomic<void*>, kMaxSlots> g_slotPawns{};
 
-enum class UsercmdInjectionPhase
+enum class UsercmdInjectionPhase : uint8_t
 {
     PendingPress,
     Holding,
@@ -98,51 +104,51 @@ struct UsercmdSuppression
     bool releasePending;
 };
 
-static std::array<std::vector<UsercmdInjection>, kMaxSlots> g_usercmdInjections{};
-static std::array<std::vector<UsercmdSuppression>, kMaxSlots> g_usercmdSuppressions{};
-static std::array<std::vector<UsercmdMovement>, kMaxSlots> g_usercmdMovements{};
-static std::array<uint64_t, kMaxSlots> g_injectedHeldMasks{};
-static std::array<uint64_t, kMaxSlots> g_movementHeldMasks{};
-static std::mutex g_usercmdInjectionMutex;
-static std::atomic<int64_t> g_nextUsercmdInjectionId{ 1 };
-static std::atomic<int64_t> g_nextUsercmdSuppressionId{ 1 };
-static std::atomic<int64_t> g_nextUsercmdMovementId{ 1 };
+std::array<std::vector<UsercmdInjection>, kMaxSlots> g_usercmdInjections{};
+std::array<std::vector<UsercmdSuppression>, kMaxSlots> g_usercmdSuppressions{};
+std::array<std::vector<UsercmdMovement>, kMaxSlots> g_usercmdMovements{};
+std::array<uint64_t, kMaxSlots> g_injectedHeldMasks{};
+std::array<uint64_t, kMaxSlots> g_movementHeldMasks{};
+std::mutex g_usercmdInjectionMutex;
+std::atomic<int64_t> g_nextUsercmdInjectionId{ 1 };
+std::atomic<int64_t> g_nextUsercmdSuppressionId{ 1 };
+std::atomic<int64_t> g_nextUsercmdMovementId{ 1 };
 
-static std::atomic<uint64_t> g_hookCalls{ 0 };
-static std::atomic<int> g_lastSlot{ -1 };
-static std::atomic<uint64_t> g_finishMoveCalls{ 0 };
-static std::atomic<uint64_t> g_playerRunCommandCalls{ 0 };
-static std::atomic<uint64_t> g_usercmdMovementApplyCalls{ 0 };
-static std::atomic<int> g_lastUsercmdMovementSlot{ -1 };
-static std::atomic<int> g_lastUsercmdForwardMove{ 0 };
-static std::atomic<int> g_lastUsercmdLeftMove{ 0 };
-static std::atomic<uint64_t> g_physicsSimulateCalls{ 0 };
-static std::atomic<int> g_lastPhysicsSlot{ -1 };
-static std::atomic<uint64_t> g_replayCommitCalls{ 0 };
-static std::atomic<uint64_t> g_slotResolveCalls{ 0 };
-static std::atomic<uint64_t> g_slotResolveFailures{ 0 };
-static std::atomic<uintptr_t> g_lastServices{ 0 };
-static std::atomic<uintptr_t> g_lastPawn{ 0 };
-static std::atomic<uint32_t> g_lastControllerHandle{ 0 };
-static std::atomic<uint32_t> g_lastOriginalControllerHandle{ 0 };
-static std::atomic<int> g_lastControllerIndex{ -1 };
-static std::atomic<int> g_lastOriginalControllerIndex{ -1 };
-static std::atomic<int> g_lastOwnerSlot{ -1 };
+std::atomic<uint64_t> g_hookCalls{ 0 };
+std::atomic<int> g_lastSlot{ -1 };
+std::atomic<uint64_t> g_finishMoveCalls{ 0 };
+std::atomic<uint64_t> g_playerRunCommandCalls{ 0 };
+std::atomic<uint64_t> g_usercmdMovementApplyCalls{ 0 };
+std::atomic<int> g_lastUsercmdMovementSlot{ -1 };
+std::atomic<int> g_lastUsercmdForwardMove{ 0 };
+std::atomic<int> g_lastUsercmdLeftMove{ 0 };
+std::atomic<uint64_t> g_physicsSimulateCalls{ 0 };
+std::atomic<int> g_lastPhysicsSlot{ -1 };
+std::atomic<uint64_t> g_replayCommitCalls{ 0 };
+std::atomic<uint64_t> g_slotResolveCalls{ 0 };
+std::atomic<uint64_t> g_slotResolveFailures{ 0 };
+std::atomic<uintptr_t> g_lastServices{ 0 };
+std::atomic<uintptr_t> g_lastPawn{ 0 };
+std::atomic<uint32_t> g_lastControllerHandle{ 0 };
+std::atomic<uint32_t> g_lastOriginalControllerHandle{ 0 };
+std::atomic<int> g_lastControllerIndex{ -1 };
+std::atomic<int> g_lastOriginalControllerIndex{ -1 };
+std::atomic<int> g_lastOwnerSlot{ -1 };
 
-static bool IsThrowableUtilityDef(int def) { return def >= 43 && def <= 48; }
+bool IsThrowableUtilityDef(int def) { return def >= 43 && def <= 48; }
 
 // Reports whether a slot can index the fixed replay state arrays.
-static bool ValidSlotIndex(int slot) { return slot >= 0 && slot < kMaxSlots; }
+bool ValidSlotIndex(int slot) { return slot >= 0 && slot < kMaxSlots; }
 
 // Reads the helper pawn field embedded in movement services.
-static void* ServicesToPawnField(void* services)
+void* ServicesToPawnField(void* services)
 {
     void* pawn = nullptr;
     return GuardedRead(services, tg::g_servicesPawn, pawn) ? pawn : nullptr;
 }
 
 // Verifies that a pawn currently owns the supplied movement services.
-static bool PawnOwnsServices(void* pawn, void* services)
+bool PawnOwnsServices(void* pawn, void* services)
 {
     if (!pawn || !services) return false;
     void* liveServices = nullptr;
@@ -150,6 +156,8 @@ static bool PawnOwnsServices(void* pawn, void* services)
 }
 
 // Registers a readable pawn whose current owner matches the requested slot.
+} // namespace
+
 bool SetReplayPawn(int slot, void* pawn)
 {
     if (!ValidSlotIndex(slot) || motion_recorder::IsReplaying(slot)) return false;
@@ -159,7 +167,7 @@ bool SetReplayPawn(int slot, void* pawn)
     void* identity = nullptr;
     uint32_t handle = 0;
     if (!GuardedRead(pawn, tg::g_entIdentity, identity) || !identity || !GuardedRead(identity, tg::g_entIdentityEHandle, handle) ||
-        handle == 0u || handle == 0xFFFFFFFFu)
+        handle == 0U || handle == 0xFFFFFFFFU)
         return false;
 
     int ownerSlot = ControllerSlotForPawn(pawn);
@@ -189,7 +197,9 @@ void* ResolveReplayPawn(int slot, void* services)
 }
 
 // Finds a registered slot by validating every pawn-to-services link.
-static int RegisteredSlotForServices(void* services)
+namespace {
+
+int RegisteredSlotForServices(void* services)
 {
     if (!services) return -1;
     for (int slot = 0; slot < kMaxSlots; ++slot)
@@ -200,7 +210,7 @@ static int RegisteredSlotForServices(void* services)
     return -1;
 }
 
-static int ServicesToSlot(void* services)
+int ServicesToSlot(void* services)
 {
     g_slotResolveCalls.fetch_add(1, std::memory_order_relaxed);
     g_lastServices.store(reinterpret_cast<uintptr_t>(services), std::memory_order_relaxed);
@@ -233,7 +243,7 @@ static int ServicesToSlot(void* services)
 }
 
 // services -> pawn -> WeaponServices*, for the recording weapon tap.
-static void* ServicesToWeaponServices(int slot, void* services)
+void* ServicesToWeaponServices(int slot, void* services)
 {
     void* pawn = ResolveReplayPawn(slot, services);
     if (!pawn) return nullptr;
@@ -241,28 +251,31 @@ static void* ServicesToWeaponServices(int slot, void* services)
     return GuardedRead(pawn, tg::g_pawnWeaponServices, weaponServices) ? weaponServices : nullptr;
 }
 
-static float NormalizeDeg(float a)
+float NormalizeDeg(float a)
 {
-    a = std::fmod(a + 180.0f, 360.0f);
-    if (a < 0.0f) a += 360.0f;
-    return a - 180.0f;
+    a = std::fmod(a + 180.0F, 360.0F);
+    if (a < 0.0F) a += 360.0F;
+    return a - 180.0F;
 }
 
 // Returns monotonic time in milliseconds for injection expiry checks
-static int64_t MonotonicMilliseconds()
+int64_t MonotonicMilliseconds()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 // Creates an independently cancellable usercmd button injection
+} // namespace
+
 int64_t InjectUsercmd(int slot, uint64_t buttonMask, int durationMs)
 {
     if (!ValidSlotIndex(slot) || buttonMask == 0 || durationMs < 0 || !g_subtickActive || motion_recorder::IsReplaying(slot)) return -1;
 
     int64_t id = g_nextUsercmdInjectionId.fetch_add(1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     if (motion_recorder::IsReplaying(slot)) return -1;
-    g_usercmdInjections[slot].push_back({ id, buttonMask, 0, durationMs, UsercmdInjectionPhase::PendingPress });
+    g_usercmdInjections[slot].push_back(
+        { .id = id, .buttonMask = buttonMask, .expiresAtMs = 0, .durationMs = durationMs, .phase = UsercmdInjectionPhase::PendingPress });
     return id;
 }
 
@@ -274,9 +287,10 @@ int64_t StartUsercmdMovement(int slot, float forwardMove, float leftMove)
         return -1;
 
     int64_t id = g_nextUsercmdMovementId.fetch_add(1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     if (motion_recorder::IsReplaying(slot)) return -1;
-    g_usercmdMovements[slot].push_back({ id, std::clamp(forwardMove, -1.0f, 1.0f), std::clamp(leftMove, -1.0f, 1.0f) });
+    g_usercmdMovements[slot].push_back(
+        { .id = id, .forwardMove = std::clamp(forwardMove, -1.0F, 1.0F), .leftMove = std::clamp(leftMove, -1.0F, 1.0F) });
     return id;
 }
 
@@ -285,12 +299,12 @@ bool UpdateUsercmdMovement(int slot, int64_t movementId, float forwardMove, floa
 {
     if (!ValidSlotIndex(slot) || movementId <= 0 || !std::isfinite(forwardMove) || !std::isfinite(leftMove)) return false;
 
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     for (UsercmdMovement& movement : g_usercmdMovements[slot])
     {
         if (movement.id != movementId) continue;
-        movement.forwardMove = std::clamp(forwardMove, -1.0f, 1.0f);
-        movement.leftMove = std::clamp(leftMove, -1.0f, 1.0f);
+        movement.forwardMove = std::clamp(forwardMove, -1.0F, 1.0F);
+        movement.leftMove = std::clamp(leftMove, -1.0F, 1.0F);
         return true;
     }
     return false;
@@ -301,7 +315,7 @@ bool CancelUsercmdMovement(int slot, int64_t movementId)
 {
     if (!ValidSlotIndex(slot) || movementId <= 0) return false;
 
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     auto& movements = g_usercmdMovements[slot];
     for (auto it = movements.begin(); it != movements.end(); ++it)
     {
@@ -317,7 +331,7 @@ bool CancelUsercmdInjection(int slot, int64_t injectionId)
 {
     if (!ValidSlotIndex(slot) || injectionId <= 0) return false;
 
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     auto& injections = g_usercmdInjections[slot];
     for (auto it = injections.begin(); it != injections.end(); ++it)
     {
@@ -337,9 +351,10 @@ bool SuppressUsercmd(int slot, uint64_t buttonMask, int durationMs)
     if (!ValidSlotIndex(slot) || buttonMask == 0 || durationMs <= 0 || !g_subtickActive || motion_recorder::IsReplaying(slot)) return false;
 
     int64_t expiresAtMs = MonotonicMilliseconds() + durationMs;
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     if (motion_recorder::IsReplaying(slot)) return false;
-    g_usercmdSuppressions[slot].push_back({ 0, buttonMask, expiresAtMs, false, true });
+    g_usercmdSuppressions[slot].push_back(
+        { .id = 0, .buttonMask = buttonMask, .expiresAtMs = expiresAtMs, .persistent = false, .releasePending = true });
     return true;
 }
 
@@ -349,9 +364,10 @@ int64_t StartUsercmdSuppression(int slot, uint64_t buttonMask)
     if (!ValidSlotIndex(slot) || buttonMask == 0 || !g_subtickActive || motion_recorder::IsReplaying(slot)) return -1;
 
     int64_t id = g_nextUsercmdSuppressionId.fetch_add(1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     if (motion_recorder::IsReplaying(slot)) return -1;
-    g_usercmdSuppressions[slot].push_back({ id, buttonMask, 0, true, true });
+    g_usercmdSuppressions[slot].push_back(
+        { .id = id, .buttonMask = buttonMask, .expiresAtMs = 0, .persistent = true, .releasePending = true });
     return id;
 }
 
@@ -360,7 +376,7 @@ bool CancelUsercmdSuppression(int slot, int64_t suppressionId)
 {
     if (!ValidSlotIndex(slot) || suppressionId <= 0) return false;
 
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     auto& suppressions = g_usercmdSuppressions[slot];
     for (auto it = suppressions.begin(); it != suppressions.end(); ++it)
     {
@@ -376,7 +392,7 @@ void ClearUsercmdInjections(int slot)
 {
     if (!ValidSlotIndex(slot)) return;
 
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     g_usercmdInjections[slot].clear();
     g_usercmdSuppressions[slot].clear();
     g_usercmdMovements[slot].clear();
@@ -385,41 +401,43 @@ void ClearUsercmdInjections(int slot)
 }
 
 // Reports whether a slot has injections waiting for command processing
-static bool HasUsercmdInjection(int slot)
+namespace {
+
+bool HasUsercmdInjection(int slot)
 {
     if (!ValidSlotIndex(slot)) return false;
 
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     return !g_usercmdInjections[slot].empty();
 }
 
 // Reports whether a slot has button suppressions waiting for command processing
-static bool HasUsercmdSuppression(int slot)
+bool HasUsercmdSuppression(int slot)
 {
     if (!ValidSlotIndex(slot)) return false;
 
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     return !g_usercmdSuppressions[slot].empty();
 }
 
 // Reports whether a slot has an active analog movement override
-static bool HasUsercmdMovement(int slot)
+bool HasUsercmdMovement(int slot)
 {
     if (!ValidSlotIndex(slot)) return false;
 
-    std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+    std::scoped_lock lock(g_usercmdInjectionMutex);
     return !g_usercmdMovements[slot].empty();
 }
 
 // Replaces Bot AI analog movement after the final command is generated
-static bool ApplyUsercmdMovement(int slot, PlayerCommand* pc, CBaseUserCmdPB* base)
+bool ApplyUsercmdMovement(int slot, PlayerCommand* pc, CBaseUserCmdPB* base) // NOLINT(readability-non-const-parameter)
 {
     if (!ValidSlotIndex(slot) || pc == nullptr || base == nullptr) return false;
 
     UsercmdMovement movement{};
     uint64_t previousMask = 0;
     {
-        std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+        std::scoped_lock lock(g_usercmdInjectionMutex);
         const auto& movements = g_usercmdMovements[slot];
         if (movements.empty()) return false;
         movement = movements.back();
@@ -427,15 +445,15 @@ static bool ApplyUsercmdMovement(int slot, PlayerCommand* pc, CBaseUserCmdPB* ba
     }
 
     uint64_t movementMask = 0;
-    if (movement.forwardMove > 0.0f) movementMask |= kInForward;
-    else if (movement.forwardMove < 0.0f)
+    if (movement.forwardMove > 0.0F) movementMask |= kInForward;
+    else if (movement.forwardMove < 0.0F)
         movementMask |= kInBack;
-    if (movement.leftMove > 0.0f) movementMask |= kInMoveLeft;
-    else if (movement.leftMove < 0.0f)
+    if (movement.leftMove > 0.0F) movementMask |= kInMoveLeft;
+    else if (movement.leftMove < 0.0F)
         movementMask |= kInMoveRight;
 
     {
-        std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+        std::scoped_lock lock(g_usercmdInjectionMutex);
         g_movementHeldMasks[slot] = movementMask;
     }
 
@@ -463,21 +481,21 @@ static bool ApplyUsercmdMovement(int slot, PlayerCommand* pc, CBaseUserCmdPB* ba
     for (int index = 0; index < base->subtick_moves_size(); ++index)
     {
         CSubtickMoveStep* step = base->mutable_subtick_moves(index);
-        step->set_analog_forward_delta(0.0f);
-        step->set_analog_left_delta(0.0f);
+        step->set_analog_forward_delta(0.0F);
+        step->set_analog_left_delta(0.0F);
     }
     return true;
 }
 
 // Merges active injections and emits aggregate press and release edges
-static bool ApplyUsercmdInjections(int slot, PlayerCommand* pc, CBaseUserCmdPB* base)
+bool ApplyUsercmdInjections(int slot, PlayerCommand* pc, CBaseUserCmdPB* base)
 {
     if (!ValidSlotIndex(slot) || !pc || !base) return false;
 
     uint64_t activeMask = 0;
     uint64_t previousMask = 0;
     {
-        std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+        std::scoped_lock lock(g_usercmdInjectionMutex);
         auto& injections = g_usercmdInjections[slot];
         int64_t nowMs = MonotonicMilliseconds();
         for (auto it = injections.begin(); it != injections.end();)
@@ -523,14 +541,14 @@ static bool ApplyUsercmdInjections(int slot, PlayerCommand* pc, CBaseUserCmdPB* 
 }
 
 // Removes suppressed buttons after Bot AI has produced the final command
-static bool ApplyUsercmdSuppressions(int slot, PlayerCommand* pc, CBaseUserCmdPB* base)
+bool ApplyUsercmdSuppressions(int slot, PlayerCommand* pc, CBaseUserCmdPB* base) // NOLINT(readability-non-const-parameter)
 {
     if (!ValidSlotIndex(slot) || !pc || !base) return false;
 
     uint64_t suppressedMask = 0;
     uint64_t releasedMask = 0;
     {
-        std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+        std::scoped_lock lock(g_usercmdInjectionMutex);
         auto& suppressions = g_usercmdSuppressions[slot];
         int64_t nowMs = MonotonicMilliseconds();
         for (auto it = suppressions.begin(); it != suppressions.end();)
@@ -568,7 +586,7 @@ static bool ApplyUsercmdSuppressions(int slot, PlayerCommand* pc, CBaseUserCmdPB
     for (int i = 0; i < base->subtick_moves_size(); ++i)
     {
         CSubtickMoveStep* move = base->mutable_subtick_moves(i);
-        uint64_t buttonsMask = static_cast<uint64_t>(move->button()) & ~suppressedMask;
+        uint64_t buttonsMask = move->button() & ~suppressedMask;
         move->set_button(buttonsMask);
         if (buttonsMask == 0) move->set_pressed(false);
     }
@@ -576,7 +594,7 @@ static bool ApplyUsercmdSuppressions(int slot, PlayerCommand* pc, CBaseUserCmdPB
 }
 
 // Applies one recorded G-drop event through the bot client-command path
-static void ApplyReplayDrop(int slot, void* services)
+void ApplyReplayDrop(int slot, void* services)
 {
     ReplayDropEvent event{};
     if (!motion_recorder::TakeCurrentReplayDrop(slot, event)) return;
@@ -586,9 +604,9 @@ static void ApplyReplayDrop(int slot, void* services)
 // ---- ProcessMovement: record pre/post + replay pre ----
 
 // Defined after HookedFinishMove
-static void EnsureVtableHooks(void* services);
+void EnsureVtableHooks(void* services);
 
-static void BC_FASTCALL HookedProcessMovement(void* services, void* moveData)
+void BC_FASTCALL HookedProcessMovement(void* services, void* moveData)
 {
     g_hookCalls.fetch_add(1, std::memory_order_relaxed);
     int slot = ServicesToSlot(services);
@@ -621,7 +639,7 @@ static void BC_FASTCALL HookedProcessMovement(void* services, void* moveData)
 
 // ---- FinishMove: replay post-write + commit ----
 
-static void BC_FASTCALL HookedFinishMove(void* services, void* cmd, void* moveData)
+void BC_FASTCALL HookedFinishMove(void* services, void* cmd, void* moveData)
 {
     g_finishMoveCalls.fetch_add(1, std::memory_order_relaxed);
     int slot = ServicesToSlot(services);
@@ -645,7 +663,7 @@ static void BC_FASTCALL HookedFinishMove(void* services, void* cmd, void* moveDa
 
 // ---- PlayerRunCommand: subtick record + re-inject ----
 
-static void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
+void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
 {
     projectile_birth_align::ProcessPending();
     g_playerRunCommandCalls.fetch_add(1, std::memory_order_relaxed);
@@ -667,14 +685,14 @@ static void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
             // Read this tick's subtick_moves into SubtickMove[] and
             // stash; OnCapturePost (PhysicsSimulate-post) commits them.
             int n = base->subtick_moves_size();
-            if (n > motion_recorder::kMaxSubtickPerTick) n = motion_recorder::kMaxSubtickPerTick;
+            n = std::min(n, motion_recorder::kMaxSubtickPerTick);
             SubtickMove moves[motion_recorder::kMaxSubtickPerTick];
             for (int i = 0; i < n; ++i)
             {
                 const CSubtickMoveStep& s = base->subtick_moves(i);
                 moves[i].when = s.when();
                 moves[i].button = static_cast<uint32_t>(s.button());
-                moves[i].pressed = s.pressed() ? 1.0f : 0.0f;
+                moves[i].pressed = s.pressed() ? 1.0F : 0.0F;
                 moves[i].analogForward = s.analog_forward_delta();
                 moves[i].analogLeft = s.analog_left_delta();
                 moves[i].pitchDelta = s.pitch_delta();
@@ -731,7 +749,7 @@ static void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
 
         if (replaying)
         {
-            constexpr uint64_t kGrenadeAttackMask = (1ull << 0) | (1ull << 11);
+            constexpr uint64_t kGrenadeAttackMask = (1ULL << 0) | (1ULL << 11);
             motion_recorder::ReplayCommandFrame frame{};
             if (motion_recorder::ReplayCommandFrameForSimulation(slot, frame))
             {
@@ -756,7 +774,7 @@ static void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
                 CMsgQAngle* view = base->mutable_viewangles();
                 view->set_x(frame.commandView.pitch);
                 view->set_y(NormalizeDeg(frame.commandView.yaw));
-                view->set_z((frame.commandFields & motion_recorder::kCommandFieldViewAngles) != 0 ? frame.commandView.roll : 0.0f);
+                view->set_z((frame.commandFields & motion_recorder::kCommandFieldViewAngles) != 0 ? frame.commandView.roll : 0.0F);
 
                 if ((frame.commandFields & motion_recorder::kCommandFieldForwardMove) != 0) base->set_forwardmove(frame.forwardMove);
                 if ((frame.commandFields & motion_recorder::kCommandFieldLeftMove) != 0) base->set_leftmove(frame.leftMove);
@@ -779,18 +797,18 @@ static void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
                     if (suppressUnsafeUtilityAttack && (button & static_cast<uint32_t>(kGrenadeAttackMask)) != 0)
                     {
                         button &= ~static_cast<uint32_t>(kGrenadeAttackMask);
-                        if (button == 0) pressed = 0.0f;
+                        if (button == 0) pressed = 0.0F;
                     }
 
                     CSubtickMoveStep* m = base->add_subtick_moves();
                     m->set_when(frame.subticks[i].when);
                     m->set_button(button);
                     if (button != 0) // digital press/release
-                        m->set_pressed(pressed != 0.0f);
-                    if (frame.subticks[i].pitchDelta != 0.0f) m->set_pitch_delta(frame.subticks[i].pitchDelta);
-                    if (frame.subticks[i].yawDelta != 0.0f) m->set_yaw_delta(frame.subticks[i].yawDelta);
-                    if (frame.subticks[i].analogForward != 0.0f) m->set_analog_forward_delta(frame.subticks[i].analogForward);
-                    if (frame.subticks[i].analogLeft != 0.0f) m->set_analog_left_delta(frame.subticks[i].analogLeft);
+                        m->set_pressed(pressed != 0.0F);
+                    if (frame.subticks[i].pitchDelta != 0.0F) m->set_pitch_delta(frame.subticks[i].pitchDelta);
+                    if (frame.subticks[i].yawDelta != 0.0F) m->set_yaw_delta(frame.subticks[i].yawDelta);
+                    if (frame.subticks[i].analogForward != 0.0F) m->set_analog_forward_delta(frame.subticks[i].analogForward);
+                    if (frame.subticks[i].analogLeft != 0.0F) m->set_analog_left_delta(frame.subticks[i].analogLeft);
                 }
 
                 motion_recorder::OnReplayCommandPre(slot, services, frame.tick, frame.commandView);
@@ -808,7 +826,7 @@ static void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
 // ---- PhysicsSimulate: the per-tick boundary ----
 // Records pre/post + commits
 
-static void BC_FASTCALL HookedPhysicsSimulate(void* controller)
+void BC_FASTCALL HookedPhysicsSimulate(void* controller)
 {
     projectile_birth_align::ProcessPending();
     g_physicsSimulateCalls.fetch_add(1, std::memory_order_relaxed);
@@ -836,22 +854,23 @@ static void BC_FASTCALL HookedPhysicsSimulate(void* controller)
     }
 }
 
-static std::atomic<bool> g_vtHooksTried{ false };
+std::atomic<bool> g_vtHooksTried{ false };
 
-static void EnsureVtableHooks(void* services)
+void EnsureVtableHooks(void* services)
 {
     if (g_vtHooksTried.exchange(true, std::memory_order_acq_rel)) return;
     if (!services) return;
     void** vt = nullptr;
     if (!GuardedRead(services, 0, vt) || !vt) return;
 
-    if (!GuardedRead(vt, tg::g_vtIdxFinishMove * static_cast<int>(sizeof(void*)), g_addrFinishMove)) g_addrFinishMove = nullptr;
+    if (!GuardedRead(static_cast<const void*>(vt), tg::g_vtIdxFinishMove * static_cast<int>(sizeof(void*)), g_addrFinishMove))
+        g_addrFinishMove = nullptr;
     if (g_addrFinishMove &&
         g_hookFinishMove.Create(g_addrFinishMove, reinterpret_cast<void*>(&HookedFinishMove), reinterpret_cast<void**>(&g_origFinishMove)))
         g_hookFinishMove.Enable();
 
     // PlayerRunCommand (subtick record/re-inject)
-    if (!GuardedRead(vt, tg::g_vtIdxPlayerRunCommand * static_cast<int>(sizeof(void*)), g_addrPlayerRunCommand))
+    if (!GuardedRead(static_cast<const void*>(vt), tg::g_vtIdxPlayerRunCommand * static_cast<int>(sizeof(void*)), g_addrPlayerRunCommand))
         g_addrPlayerRunCommand = nullptr;
     if (g_addrPlayerRunCommand &&
         g_hookPlayerRunCommand.Create(g_addrPlayerRunCommand, reinterpret_cast<void*>(&HookedPlayerRunCommand),
@@ -868,7 +887,13 @@ static void EnsureVtableHooks(void* services)
     }
 }
 
-bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
+} // namespace
+
+bool Install( // NOLINT(misc-use-internal-linkage)
+    const nlohmann::json& gd,
+    const sig::ModuleInfo& serverModule,
+    char* errorOut,
+    size_t errorOutLen) // NOLINT(misc-use-internal-linkage)
 {
     g_addrProcessMovement = sig::ResolveSig(gd, serverModule, "CCSPlayer_MovementServices::ProcessMovement", errorOut, errorOutLen);
     if (!g_addrProcessMovement)
@@ -938,7 +963,7 @@ void Remove()
     for (auto& pawn : g_slotPawns)
         pawn.store(nullptr, std::memory_order_release);
     {
-        std::lock_guard<std::mutex> lock(g_usercmdInjectionMutex);
+        std::scoped_lock lock(g_usercmdInjectionMutex);
         for (auto& injections : g_usercmdInjections)
             injections.clear();
         for (auto& suppressions : g_usercmdSuppressions)

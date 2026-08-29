@@ -9,7 +9,7 @@ namespace bot_controller {
 // Slot3 = knife/zeus
 // Slot4 = grenades (he/flash/smoke/molotov/decoy)
 // Slot5 = C4
-enum class LockTarget : int
+enum class LockTarget : int // NOLINT(performance-enum-size)
 {
     None = 0,
     Slot1 = 1,

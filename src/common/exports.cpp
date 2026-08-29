@@ -8,11 +8,12 @@
 #include "VoiceSender.h"
 #include "ProjectileBirthAlign.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
+#ifdef _WIN32
 #define BC_EXPORT __declspec(dllexport)
 #else
 #define BC_EXPORT __attribute__((visibility("default")))
@@ -147,8 +148,10 @@ extern "C" BC_EXPORT int BotController_GetProfile(int slot, bot_controller::BotP
 
 // ---- Bot buy plans ----
 
+namespace {
+
 // Split a space/comma separated alias string into tokens.
-static std::vector<std::string> SplitAliases(const char* csv)
+std::vector<std::string> SplitAliases(const char* csv)
 {
     std::vector<std::string> out;
     if (!csv) return out;
@@ -170,6 +173,8 @@ static std::vector<std::string> SplitAliases(const char* csv)
     if (!cur.empty()) out.push_back(cur);
     return out;
 }
+
+} // namespace
 
 // Set a slot's buy plan from a space/comma separated alias list. 0 ok.
 extern "C" BC_EXPORT int BotController_SetBuyPlan(int slot, const char* aliases)
@@ -271,7 +276,7 @@ extern "C" BC_EXPORT int BotController_TransferRecordingToReplay(int srcSlot, in
     int nt = bot_controller::motion_recorder::RecordedTickCount(srcSlot);
     if (nt <= 0) return -1;
     int ns = bot_controller::motion_recorder::RecordedSubtickCount(srcSlot);
-    if (ns < 0) ns = 0;
+    ns = std::max(ns, 0);
     int nc = bot_controller::motion_recorder::RecordedCommandCount(srcSlot);
     if (nc != nt) return -1;
     std::vector<bot_controller::ReplayTick> ticks(nt);
@@ -295,7 +300,8 @@ extern "C" BC_EXPORT int BotController_StartReplay(int slot, int loop)
 // Registers the managed plugin's authoritative pawn pointer for replay.
 extern "C" BC_EXPORT int BotController_SetReplayPawn(int slot, uint64_t pawnPtr)
 {
-    return bot_controller::input_injector::SetReplayPawn(slot, reinterpret_cast<void*>(static_cast<uintptr_t>(pawnPtr))) ? 0 : -1;
+    void* pawn = reinterpret_cast<void*>(static_cast<uintptr_t>(pawnPtr)); // NOLINT(performance-no-int-to-ptr)
+    return bot_controller::input_injector::SetReplayPawn(slot, pawn) ? 0 : -1;
 }
 
 extern "C" BC_EXPORT int BotController_StopReplay(int slot) { return bot_controller::motion_recorder::StopReplay(slot) ? 0 : -1; }

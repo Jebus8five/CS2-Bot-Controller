@@ -9,11 +9,14 @@
 #include "hook.h"
 #include "version_targets.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <cstddef>
 #include <mutex>
-#include <vector>
+#include <vector> // NOLINT(misc-include-cleaner)
 
 #include <convar.h>
 #include <eiface.h>
@@ -23,7 +26,7 @@ namespace tg = bot_controller::targets;
 
 namespace bot_controller {
 namespace motion_recorder {
-#if defined(_WIN32)
+#ifdef _WIN32
 using DropWeaponResult = uint8_t;
 #else
 using DropWeaponResult = void*;
@@ -50,7 +53,7 @@ struct RecordState
     MovementSnapshot pendingPre{};
     bool havePre{ false };
     uint32_t pendingEventFlags{ ReplayEventNone };
-    ReplayDropEvent pendingDropEvent{ -1, ReplayDropVectorNone, {}, {} };
+    ReplayDropEvent pendingDropEvent{ .weaponDefIndex = -1, .vectorFlags = ReplayDropVectorNone, .target = {}, .velocity = {} };
     std::vector<DropCandidate> pendingDropCandidates;
     std::atomic<void*> liveWs{ nullptr };
     std::atomic<int> currentDef{ -1 };
@@ -72,47 +75,49 @@ struct ReplayState
     std::mutex mu; // guards ticks/subs/subOffset
 };
 
-static std::array<RecordState, kMaxSlots> g_rec;
-static std::array<ReplayState, kMaxSlots> g_rep;
-static std::atomic<uint64_t> g_dropHookCallCount{ 0 };
-static std::atomic<uint64_t> g_dropHookRecordingCallCount{ 0 };
-static std::atomic<uint64_t> g_dropHookPhysicalDropCount{ 0 };
-static std::atomic<uint64_t> g_dropHookInvalidDefCount{ 0 };
-static std::atomic<uint64_t> g_dropCaptureCount{ 0 };
-static std::atomic<uint64_t> g_dropReplayAttemptCount{ 0 };
-static std::atomic<uint64_t> g_dropReplayHookCallCount{ 0 };
-static std::atomic<uint64_t> g_dropReplayVectorOverrideCount{ 0 };
-static std::atomic<uint64_t> g_dropReplayDetachedCount{ 0 };
-static std::atomic<uint64_t> g_dropReplayNativeCallCount{ 0 };
-static std::atomic<int> g_lastDropCaptureSlot{ -1 };
-static std::atomic<uint32_t> g_lastDropCaptureVectorFlags{ ReplayDropVectorNone };
-static std::atomic<int> g_lastDropHookSlot{ -1 };
-static std::atomic<int> g_lastDropHookWeaponDef{ -1 };
-static std::atomic<bool> g_lastDropHookWasRecording{ false };
-static std::atomic<void*> g_lastDropHookPawn{ nullptr };
-static std::atomic<void*> g_lastDropHookTarget{ nullptr };
-static std::atomic<void*> g_lastDropHookVelocity{ nullptr };
-static std::atomic<int> g_lastDropReplaySlot{ -1 };
-static std::atomic<int> g_lastDropReplayWeaponDef{ -1 };
-static std::atomic<uint32_t> g_lastDropReplayVectorFlags{ ReplayDropVectorNone };
-static Hook g_hookDropWeapon;
-static DropWeaponT g_origDropWeapon = nullptr;
-static void* g_addrDropWeapon = nullptr;
-static std::atomic<bool> g_dropHookTried{ false };
-static std::atomic<bool> g_dropHookReady{ false };
-static thread_local int g_activeReplayDropSlot = -1;
-static thread_local const ReplayDropEvent* g_activeReplayDropEvent = nullptr;
+namespace {
+
+std::array<RecordState, kMaxSlots> g_rec;
+std::array<ReplayState, kMaxSlots> g_rep;
+std::atomic<uint64_t> g_dropHookCallCount{ 0 };
+std::atomic<uint64_t> g_dropHookRecordingCallCount{ 0 };
+std::atomic<uint64_t> g_dropHookPhysicalDropCount{ 0 };
+std::atomic<uint64_t> g_dropHookInvalidDefCount{ 0 };
+std::atomic<uint64_t> g_dropCaptureCount{ 0 };
+std::atomic<uint64_t> g_dropReplayAttemptCount{ 0 };
+std::atomic<uint64_t> g_dropReplayHookCallCount{ 0 };
+std::atomic<uint64_t> g_dropReplayVectorOverrideCount{ 0 };
+std::atomic<uint64_t> g_dropReplayDetachedCount{ 0 };
+std::atomic<uint64_t> g_dropReplayNativeCallCount{ 0 };
+std::atomic<int> g_lastDropCaptureSlot{ -1 };
+std::atomic<uint32_t> g_lastDropCaptureVectorFlags{ ReplayDropVectorNone };
+std::atomic<int> g_lastDropHookSlot{ -1 };
+std::atomic<int> g_lastDropHookWeaponDef{ -1 };
+std::atomic<bool> g_lastDropHookWasRecording{ false };
+std::atomic<void*> g_lastDropHookPawn{ nullptr };
+std::atomic<void*> g_lastDropHookTarget{ nullptr };
+std::atomic<void*> g_lastDropHookVelocity{ nullptr };
+std::atomic<int> g_lastDropReplaySlot{ -1 };
+std::atomic<int> g_lastDropReplayWeaponDef{ -1 };
+std::atomic<uint32_t> g_lastDropReplayVectorFlags{ ReplayDropVectorNone };
+Hook g_hookDropWeapon;
+DropWeaponT g_origDropWeapon = nullptr;
+void* g_addrDropWeapon = nullptr;
+std::atomic<bool> g_dropHookTried{ false };
+std::atomic<bool> g_dropHookReady{ false };
+thread_local int g_activeReplayDropSlot = -1;
+thread_local const ReplayDropEvent* g_activeReplayDropEvent = nullptr;
 constexpr int kMolotovDef = 46;
 constexpr int kIncendiaryDef = 48;
 
-static bool ValidSlot(int s) { return s >= 0 && s < kMaxSlots; }
+bool ValidSlot(int s) { return s >= 0 && s < kMaxSlots; }
 static int ReplayWeaponSelectForDef(int slot, int recordedDef);
 
 // Returns whether an item definition is either faction's fire grenade
-static bool IsFireGrenadeDef(int defIndex) { return defIndex == kMolotovDef || defIndex == kIncendiaryDef; }
+bool IsFireGrenadeDef(int defIndex) { return defIndex == kMolotovDef || defIndex == kIncendiaryDef; }
 
 // Prefers the recorded fire grenade and falls back to the other faction's variant
-static void* FindReplayWeaponByDef(void* ws, int recordedDef)
+void* FindReplayWeaponByDef(void* ws, int recordedDef)
 {
     void* weapon = weapon_locker_hooks::FindWeaponByDef(ws, recordedDef);
     if (weapon || !IsFireGrenadeDef(recordedDef)) return weapon;
@@ -122,10 +127,10 @@ static void* FindReplayWeaponByDef(void* ws, int recordedDef)
 }
 
 // Copies an optional engine Vector into stable recording storage
-static bool ReadDropVector(void* vector, float out[3]) { return vector && TryReadMemory(vector, 0, out, sizeof(float) * 3); }
+bool ReadDropVector(void* vector, float out[3]) { return vector && TryReadMemory(vector, 0, out, sizeof(float) * 3); }
 
 // Prefers the recorder's exact cached weapon-services owner over controller handles
-static int RecordingSlotForWeaponServices(void* weaponServices, void* pawn)
+int RecordingSlotForWeaponServices(void* weaponServices, void* pawn)
 {
     for (int slot = 0; slot < kMaxSlots; ++slot)
     {
@@ -138,7 +143,7 @@ static int RecordingSlotForWeaponServices(void* weaponServices, void* pawn)
 }
 
 // Resolves the replay slot that currently owns this weapon-services pointer
-static int ReplaySlotForWeaponServices(void* weaponServices)
+int ReplaySlotForWeaponServices(void* weaponServices)
 {
     for (int slot = 0; slot < kMaxSlots; ++slot)
     {
@@ -148,13 +153,13 @@ static int ReplaySlotForWeaponServices(void* weaponServices)
 }
 
 // Stores one real weapon-service drop in the pending recording tick
-static bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
+bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
 {
     if (!ValidSlot(slot) || event.weaponDefIndex < 0) return false;
     RecordState& r = g_rec[slot];
     if (!r.recording.load(std::memory_order_acquire)) return false;
 
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     r.pendingEventFlags |= ReplayEventDrop;
     r.pendingDropEvent = event;
     g_dropCaptureCount.fetch_add(1, std::memory_order_relaxed);
@@ -164,7 +169,7 @@ static bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
 }
 
 // Captures only calls that actually detach the supplied weapon from its owner
-static DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void* weapon, void* target, void* velocity)
+DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void* weapon, void* target, void* velocity)
 {
     g_dropHookCallCount.fetch_add(1, std::memory_order_relaxed);
 
@@ -229,7 +234,7 @@ static DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void*
     else if (ValidSlot(recordingSlot) && weapon && weaponDefIndex >= 0)
     {
         RecordState& r = g_rec[recordingSlot];
-        std::lock_guard<std::mutex> lk(r.mu);
+        std::scoped_lock lk(r.mu);
         bool found = false;
         for (RecordState::DropCandidate& candidate : r.pendingDropCandidates)
         {
@@ -240,20 +245,22 @@ static DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void*
                 break;
             }
         }
-        if (!found) r.pendingDropCandidates.push_back({ weapon, recordedEvent });
+        if (!found) r.pendingDropCandidates.push_back({ .weapon = weapon, .event = recordedEvent });
     }
     if (detached && ValidSlot(g_activeReplayDropSlot)) g_dropReplayDetachedCount.fetch_add(1, std::memory_order_relaxed);
     return result;
 }
 
 // Installs the drop hook from a live weapon-services vtable once
-static void EnsureDropWeaponHook(void* weaponServices)
+void EnsureDropWeaponHook(void* weaponServices)
 {
     if (!weaponServices || g_dropHookTried.exchange(true, std::memory_order_acq_rel)) return;
 
     void** vtable = nullptr;
     if (!GuardedRead(weaponServices, 0, vtable) || !vtable) return;
-    if (!GuardedRead(vtable, tg::g_vtIdxDropWeapon * static_cast<int>(sizeof(void*)), g_addrDropWeapon) || !g_addrDropWeapon) return;
+    if (!GuardedRead(static_cast<const void*>(vtable), tg::g_vtIdxDropWeapon * static_cast<int>(sizeof(void*)), g_addrDropWeapon) ||
+        !g_addrDropWeapon)
+        return;
 
     if (g_hookDropWeapon.Create(g_addrDropWeapon, reinterpret_cast<void*>(&HookedDropWeapon),
                                 reinterpret_cast<void**>(&g_origDropWeapon)) &&
@@ -269,7 +276,7 @@ static void EnsureDropWeaponHook(void* weaponServices)
 }
 
 // Reads a three-float engine vector through one guarded memory operation.
-static bool ReadVector3(void* base, int offset, float& x, float& y, float& z)
+bool ReadVector3(void* base, int offset, float& x, float& y, float& z)
 {
     float values[3] = {};
     if (!TryReadMemory(base, offset, values, sizeof(values))) return false;
@@ -280,14 +287,14 @@ static bool ReadVector3(void* base, int offset, float& x, float& y, float& z)
 }
 
 // Writes a three-float engine vector through one guarded memory operation.
-static bool WriteVector3(void* base, int offset, float x, float y, float z)
+bool WriteVector3(void* base, int offset, float x, float y, float z)
 {
     const float values[3] = { x, y, z };
     return TryWriteMemory(base, offset, values, sizeof(values));
 }
 
 // Resolves the current scene node through the July 2026 body component layout.
-static void* ResolveSceneNode(void* entity)
+void* ResolveSceneNode(void* entity)
 {
     void* body = nullptr;
     if (!GuardedRead(entity, tg::g_entBodyComponent, body) || !body) return nullptr;
@@ -297,7 +304,7 @@ static void* ResolveSceneNode(void* entity)
 }
 
 // Read a MovementSnapshot from live engine state (services -> pawn).
-static bool ReadSnapshot(int slot, void* services, MovementSnapshot& out)
+bool ReadSnapshot(int slot, void* services, MovementSnapshot& out)
 {
     if (!services) return false;
     void* pawn = input_injector::ResolveReplayPawn(slot, services);
@@ -318,12 +325,14 @@ static bool ReadSnapshot(int slot, void* services, MovementSnapshot& out)
 
 // ---- recording ----
 
+} // namespace
+
 bool StartRecord(int slot)
 {
     if (!ValidSlot(slot)) return false;
     RecordState& r = g_rec[slot];
     {
-        std::lock_guard<std::mutex> lk(r.mu);
+        std::scoped_lock lk(r.mu);
         r.ticks.clear();
         r.subs.clear();
         r.commands.clear();
@@ -358,7 +367,7 @@ int RecordedTickCount(int slot)
 {
     if (!ValidSlot(slot)) return -1;
     RecordState& r = g_rec[slot];
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     return static_cast<int>(r.ticks.size());
 }
 
@@ -366,7 +375,7 @@ int RecordedSubtickCount(int slot)
 {
     if (!ValidSlot(slot)) return -1;
     RecordState& r = g_rec[slot];
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     return static_cast<int>(r.subs.size());
 }
 
@@ -375,7 +384,7 @@ int RecordedCommandCount(int slot)
 {
     if (!ValidSlot(slot)) return -1;
     RecordState& r = g_rec[slot];
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     return static_cast<int>(r.commands.size());
 }
 
@@ -401,7 +410,7 @@ void OnCapturePre(int slot, void* services, void* cmd)
     if (!r.recording.load(std::memory_order_acquire)) return;
     MovementSnapshot pre{};
     if (!ReadSnapshot(slot, services, pre)) return;
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     r.pendingPre = pre;
     r.havePre = true;
 }
@@ -411,8 +420,8 @@ void OnCaptureSubticks(int slot, const SubtickMove* moves, int count)
     if (!ValidSlot(slot) || count < 0) return;
     RecordState& r = g_rec[slot];
     if (!r.recording.load(std::memory_order_acquire)) return;
-    if (count > kMaxSubtickPerTick) count = kMaxSubtickPerTick;
-    std::lock_guard<std::mutex> lk(r.mu);
+    count = std::min(count, kMaxSubtickPerTick);
+    std::scoped_lock lk(r.mu);
     r.pendingSubs.clear();
     for (int i = 0; i < count; ++i)
         r.pendingSubs.push_back(moves[i]);
@@ -424,7 +433,7 @@ void OnCaptureCommand(int slot, const ReplayCommandFrameData& command)
     if (!ValidSlot(slot)) return;
     RecordState& r = g_rec[slot];
     if (!r.recording.load(std::memory_order_acquire)) return;
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     r.pendingCommand = command;
     r.havePendingCommand = true;
 }
@@ -452,7 +461,7 @@ void OnCapturePost(int slot, void* services, void* cmd)
 
     uint32_t subtickCount;
     {
-        std::lock_guard<std::mutex> lk(r.mu);
+        std::scoped_lock lk(r.mu);
         for (size_t i = 0; i < r.pendingDropCandidates.size();)
         {
             const RecordState::DropCandidate& candidate = r.pendingDropCandidates[i];
@@ -503,9 +512,9 @@ int CopyTicks(int slot, ReplayTick* out, int maxTicks)
 {
     if (!ValidSlot(slot) || !out || maxTicks <= 0) return 0;
     RecordState& r = g_rec[slot];
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     int n = static_cast<int>(r.ticks.size());
-    if (n > maxTicks) n = maxTicks;
+    n = std::min(n, maxTicks);
     for (int i = 0; i < n; ++i)
         out[i] = r.ticks[i];
     return n;
@@ -515,9 +524,9 @@ int CopySubticks(int slot, SubtickMove* out, int maxSubticks)
 {
     if (!ValidSlot(slot) || !out || maxSubticks <= 0) return 0;
     RecordState& r = g_rec[slot];
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     int n = static_cast<int>(r.subs.size());
-    if (n > maxSubticks) n = maxSubticks;
+    n = std::min(n, maxSubticks);
     for (int i = 0; i < n; ++i)
         out[i] = r.subs[i];
     return n;
@@ -528,9 +537,9 @@ int CopyCommands(int slot, ReplayCommandFrameData* out, int maxCommands)
 {
     if (!ValidSlot(slot) || !out || maxCommands <= 0) return 0;
     RecordState& r = g_rec[slot];
-    std::lock_guard<std::mutex> lk(r.mu);
+    std::scoped_lock lk(r.mu);
     int n = static_cast<int>(r.commands.size());
-    if (n > maxCommands) n = maxCommands;
+    n = std::min(n, maxCommands);
     for (int i = 0; i < n; ++i)
         out[i] = r.commands[i];
     return n;
@@ -571,6 +580,7 @@ bool LoadReplayExtended(int slot,
         std::vector<SubtickMove> stagedSubs;
         std::vector<ReplayCommandFrameData> stagedCommands;
         std::vector<ReplayMovementExtra> stagedMovementExtras;
+        const auto subCountValue = static_cast<uint64_t>(subCount);
         std::vector<uint32_t> stagedOffsets(static_cast<size_t>(tickCount) + 1, 0);
 
         uint64_t totalSubticks = 0;
@@ -579,9 +589,9 @@ bool LoadReplayExtended(int slot,
             if (ticks[i].numSubtick > kMaxSubtickPerTick) return false;
             stagedOffsets[static_cast<size_t>(i)] = static_cast<uint32_t>(totalSubticks);
             totalSubticks += ticks[i].numSubtick;
-            if (totalSubticks > static_cast<uint64_t>(subCount)) return false;
+            if (totalSubticks > subCountValue) return false;
         }
-        if (totalSubticks != static_cast<uint64_t>(subCount)) return false;
+        if (totalSubticks != subCountValue) return false;
         stagedOffsets[static_cast<size_t>(tickCount)] = static_cast<uint32_t>(totalSubticks);
 
         if (tickCount > 0) stagedTicks.assign(ticks, ticks + tickCount);
@@ -592,7 +602,7 @@ bool LoadReplayExtended(int slot,
             stagedMovementExtras.assign(movementExtras, movementExtras + movementExtraCount);
         }
 
-        std::lock_guard<std::mutex> lk(p.mu);
+        std::scoped_lock lk(p.mu);
         if (p.playing.load(std::memory_order_acquire)) return false;
 
         p.ticks.swap(stagedTicks);
@@ -616,13 +626,13 @@ bool StartReplay(int slot, bool loop)
     if (!ValidSlot(slot)) return false;
     ReplayState& p = g_rep[slot];
     {
-        std::lock_guard<std::mutex> lk(p.mu);
+        std::scoped_lock lk(p.mu);
         if (p.ticks.empty()) return false;
     }
     p.cursor.store(0, std::memory_order_relaxed);
     p.lastAppliedDef.store(-1, std::memory_order_relaxed);
     {
-        std::lock_guard<std::mutex> lk(p.mu);
+        std::scoped_lock lk(p.mu);
         p.lastEventCursor = -1;
     }
     p.loop.store(loop, std::memory_order_relaxed);
@@ -653,7 +663,7 @@ int ReplayTotal(int slot)
 {
     if (!ValidSlot(slot)) return 0;
     ReplayState& p = g_rep[slot];
-    std::lock_guard<std::mutex> lk(p.mu);
+    std::scoped_lock lk(p.mu);
     return static_cast<int>(p.ticks.size());
 }
 
@@ -663,10 +673,10 @@ bool CurrentReplayTick(int slot, ReplayTick& out)
     if (!ValidSlot(slot)) return false;
     ReplayState& p = g_rep[slot];
     if (!p.playing.load(std::memory_order_acquire)) return false;
-    std::lock_guard<std::mutex> lk(p.mu);
+    std::scoped_lock lk(p.mu);
     int total = static_cast<int>(p.ticks.size());
     int idx = p.cursor.load(std::memory_order_relaxed) - 1;
-    if (idx < 0) idx = 0;
+    idx = std::max(idx, 0);
     if (idx >= total) return false;
     out = p.ticks[idx];
     return true;
@@ -685,7 +695,7 @@ bool ReplayCommandFrameForSimulation(int slot, ReplayCommandFrame& out)
 
     int recordedDef = -1;
     {
-        std::lock_guard<std::mutex> lk(p.mu);
+        std::scoped_lock lk(p.mu);
         const int total = static_cast<int>(p.ticks.size());
         const int cur = p.cursor.load(std::memory_order_relaxed);
         if (cur < 0 || cur >= total || p.subOffset.size() != p.ticks.size() + 1) return false;
@@ -751,7 +761,7 @@ bool ReplayCommandViewSnapshot(int slot, MovementSnapshot& out)
     if (!ValidSlot(slot)) return false;
     ReplayState& p = g_rep[slot];
     if (!p.playing.load(std::memory_order_acquire)) return false;
-    std::lock_guard<std::mutex> lk(p.mu);
+    std::scoped_lock lk(p.mu);
     int total = static_cast<int>(p.ticks.size());
     int cur = p.cursor.load(std::memory_order_relaxed);
     if (cur < 0 || cur >= total) return false;
@@ -764,14 +774,14 @@ int CurrentReplaySubticks(int slot, SubtickMove* out, int maxOut)
     if (!ValidSlot(slot) || !out || maxOut <= 0) return -1;
     ReplayState& p = g_rep[slot];
     if (!p.playing.load(std::memory_order_acquire)) return -1;
-    std::lock_guard<std::mutex> lk(p.mu);
+    std::scoped_lock lk(p.mu);
     int total = static_cast<int>(p.ticks.size());
     int idx = p.cursor.load(std::memory_order_relaxed);
     if (idx < 0 || idx >= total) return -1;
     uint32_t begin = p.subOffset[idx];
     uint32_t end = p.subOffset[idx + 1];
     int n = static_cast<int>(end - begin);
-    if (n > maxOut) n = maxOut;
+    n = std::min(n, maxOut);
     for (int i = 0; i < n; ++i)
         out[i] = p.subs[begin + i];
     return n;
@@ -782,7 +792,7 @@ bool CurrentReplayInputButtons(int slot, uint64_t& b0, uint64_t& b1, uint64_t& b
     if (!ValidSlot(slot)) return false;
     ReplayState& p = g_rep[slot];
     if (!p.playing.load(std::memory_order_acquire)) return false;
-    std::lock_guard<std::mutex> lk(p.mu);
+    std::scoped_lock lk(p.mu);
     int total = static_cast<int>(p.ticks.size());
     int cur = p.cursor.load(std::memory_order_relaxed);
     if (cur < 0 || cur >= total) return false;
@@ -831,7 +841,7 @@ int CurrentReplayWeaponDef(int slot)
     if (!ValidSlot(slot)) return -1;
     ReplayState& p = g_rep[slot];
     if (!p.playing.load(std::memory_order_acquire)) return -1;
-    std::lock_guard<std::mutex> lk(p.mu);
+    std::scoped_lock lk(p.mu);
     int total = static_cast<int>(p.ticks.size());
     int cur = p.cursor.load(std::memory_order_relaxed);
     if (cur < 0 || cur >= total) return -1;
@@ -839,7 +849,9 @@ int CurrentReplayWeaponDef(int slot)
 }
 
 // Resolves and applies the recorded weapon definition for one command frame
-static int ReplayWeaponSelectForDef(int slot, int recordedDef)
+namespace {
+
+int ReplayWeaponSelectForDef(int slot, int recordedDef)
 {
     if (!ValidSlot(slot) || !weapon_locker_hooks::WeaponHooksReady()) return -1;
     if (recordedDef < 0) return -1;
@@ -865,6 +877,8 @@ static int ReplayWeaponSelectForDef(int slot, int recordedDef)
 int CurrentReplayWeaponSelect(int slot) { return ReplayWeaponSelectForDef(slot, CurrentReplayWeaponDef(slot)); }
 
 // Returns the current drop event only once for each replay cursor
+} // namespace
+
 bool TakeCurrentReplayDrop(int slot, ReplayDropEvent& event)
 {
     event = {};
@@ -873,9 +887,9 @@ bool TakeCurrentReplayDrop(int slot, ReplayDropEvent& event)
     ReplayState& p = g_rep[slot];
     if (!p.playing.load(std::memory_order_acquire)) return false;
 
-    std::lock_guard<std::mutex> lk(p.mu);
+    std::scoped_lock lk(p.mu);
     int cur = p.cursor.load(std::memory_order_relaxed);
-    if (cur < 0 || cur >= static_cast<int>(p.ticks.size()) || p.lastEventCursor == cur) return false;
+    if (cur < 0 || static_cast<size_t>(cur) >= p.ticks.size() || p.lastEventCursor == cur) return false;
     p.lastEventCursor = cur;
 
     const ReplayTick& tick = p.ticks[cur];
@@ -993,7 +1007,9 @@ int LastDropReplayWeaponDef() { return g_lastDropReplayWeaponDef.load(std::memor
 uint32_t LastDropReplayVectorFlags() { return g_lastDropReplayVectorFlags.load(std::memory_order_relaxed); }
 
 // Write replay velocity onto the pawn. View replay is driven by SetEyeAngles.
-static void WriteVelocityToPawn(int slot, void* services, const MovementSnapshot& s)
+namespace {
+
+void WriteVelocityToPawn(int slot, void* services, const MovementSnapshot& s)
 {
     void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
@@ -1001,7 +1017,7 @@ static void WriteVelocityToPawn(int slot, void* services, const MovementSnapshot
 }
 
 // Writes replay origin through the current body-component scene node.
-static void WriteSceneNodeOrigin(int slot, void* services, const MovementSnapshot& s, float zBias = 0.0f)
+void WriteSceneNodeOrigin(int slot, void* services, const MovementSnapshot& s, float zBias = 0.0F)
 {
     void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
@@ -1014,14 +1030,14 @@ static void WriteSceneNodeOrigin(int slot, void* services, const MovementSnapsho
 }
 
 // Write origin + velocity into CMoveData.
-static void WriteMoveData(void* moveData, const MovementSnapshot& s)
+void WriteMoveData(void* moveData, const MovementSnapshot& s)
 {
     WriteVector3(moveData, tg::g_moveAbsOrigin, s.originX, s.originY, s.originZ);
     WriteVector3(moveData, tg::g_moveVelocity, s.velX, s.velY, s.velZ);
 }
 
 // Restores duck and ladder state through guarded field writes.
-static void WriteMovementServiceState(void* services, const MovementSnapshot& s)
+void WriteMovementServiceState(void* services, const MovementSnapshot& s)
 {
     WriteField(services, tg::g_servicesDuckAmount, s.duckAmount);
     WriteField(services, tg::g_servicesDuckSpeed, s.duckSpeed);
@@ -1032,30 +1048,32 @@ static void WriteMovementServiceState(void* services, const MovementSnapshot& s)
 }
 
 // Normalizes replay yaw to the engine's signed degree range
-static float NormalizeReplayYaw(float yaw)
+float NormalizeReplayYaw(float yaw)
 {
-    yaw = std::fmod(yaw + 180.0f, 360.0f);
-    if (yaw < 0.0f) yaw += 360.0f;
-    return yaw - 180.0f;
+    yaw = std::fmod(yaw + 180.0F, 360.0F);
+    if (yaw < 0.0F) yaw += 360.0F;
+    return yaw - 180.0F;
 }
 
 // Writes command view angles to the pawn fields read before movement processing
-static void WriteRawViewAnglesToPawn(void* pawn, float pitch, float yaw)
+void WriteRawViewAnglesToPawn(void* pawn, float pitch, float yaw)
 {
     const float normalizedYaw = NormalizeReplayYaw(yaw);
-    WriteVector3(pawn, tg::g_pawnViewAngle, pitch, normalizedYaw, 0.0f);
-    WriteVector3(pawn, tg::g_pawnEyeAngles, pitch, normalizedYaw, 0.0f);
+    WriteVector3(pawn, tg::g_pawnViewAngle, pitch, normalizedYaw, 0.0F);
+    WriteVector3(pawn, tg::g_pawnEyeAngles, pitch, normalizedYaw, 0.0F);
 }
 
 // Keeps the pawn and movement-service view history aligned with the command
-static void WriteReplayViewHistory(void* services, void* pawn, float pitch, float yaw)
+void WriteReplayViewHistory(void* services, void* pawn, float pitch, float yaw)
 {
     const float normalizedYaw = NormalizeReplayYaw(yaw);
-    WriteVector3(pawn, tg::g_pawnViewAnglePrevious, pitch, normalizedYaw, 0.0f);
-    WriteVector3(services, tg::g_servicesOldViewAngles, pitch, normalizedYaw, 0.0f);
+    WriteVector3(pawn, tg::g_pawnViewAnglePrevious, pitch, normalizedYaw, 0.0F);
+    WriteVector3(services, tg::g_servicesOldViewAngles, pitch, normalizedYaw, 0.0F);
 }
 
 // Seeds pawn state before weapon and grenade code consumes the replayed command
+} // namespace
+
 void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const MovementSnapshot& commandView)
 {
     if (!ValidSlot(slot) || !services || !g_rep[slot].playing.load(std::memory_order_acquire)) return;
@@ -1082,7 +1100,7 @@ void OnReplayPre(int slot, void* services, void* moveData)
     if (!p.playing.load(std::memory_order_acquire)) return;
     ReplayTick t{};
     {
-        std::lock_guard<std::mutex> lk(p.mu);
+        std::scoped_lock lk(p.mu);
         int total = static_cast<int>(p.ticks.size());
         int cur = p.cursor.load(std::memory_order_relaxed);
         if (cur >= total) return; // commit handler will stop/loop
@@ -1112,14 +1130,14 @@ void OnReplayFinishMove(int slot, void* services, void* moveData)
     if (!p.playing.load(std::memory_order_acquire)) return;
     ReplayTick t{};
     {
-        std::lock_guard<std::mutex> lk(p.mu);
+        std::scoped_lock lk(p.mu);
         int total = static_cast<int>(p.ticks.size());
         int cur = p.cursor.load(std::memory_order_relaxed);
         if (cur >= total) return;
         t = p.ticks[cur];
     }
     WriteMoveData(moveData, t.post);
-    WriteSceneNodeOrigin(slot, services, t.post, 1000.0f);
+    WriteSceneNodeOrigin(slot, services, t.post, 1000.0F);
 }
 
 void OnReplayCommit(int slot, void* services)
@@ -1129,9 +1147,10 @@ void OnReplayCommit(int slot, void* services)
     if (!p.playing.load(std::memory_order_acquire)) return;
 
     ReplayTick t{};
-    int cur, total;
+    int cur;
+    int total;
     {
-        std::lock_guard<std::mutex> lk(p.mu);
+        std::scoped_lock lk(p.mu);
         total = static_cast<int>(p.ticks.size());
         cur = p.cursor.load(std::memory_order_relaxed);
         if (cur >= total)
@@ -1185,7 +1204,7 @@ void ClearAll()
         g_rec[i].recording.store(false, std::memory_order_release);
         g_rep[i].playing.store(false, std::memory_order_release);
         {
-            std::lock_guard<std::mutex> lk(g_rec[i].mu);
+            std::scoped_lock lk(g_rec[i].mu);
             g_rec[i].ticks.clear();
             g_rec[i].subs.clear();
             g_rec[i].commands.clear();
@@ -1199,7 +1218,7 @@ void ClearAll()
             g_rec[i].pendingDropCandidates.clear();
         }
         {
-            std::lock_guard<std::mutex> lk(g_rep[i].mu);
+            std::scoped_lock lk(g_rep[i].mu);
             g_rep[i].ticks.clear();
             g_rep[i].subs.clear();
             g_rep[i].commands.clear();

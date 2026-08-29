@@ -7,7 +7,6 @@
 #include "MotionRecorder.h"
 
 #include <eiface.h>
-#include <playerslot.h>
 
 namespace bot_controller {
 namespace dispatch {

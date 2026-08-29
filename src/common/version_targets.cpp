@@ -1,6 +1,7 @@
 // Override structure offsets from gamedata.json (platform-aware)
 
 #include "version_targets.h"
+#include "nlohmann/json.hpp"
 #include "schema_resolver.h"
 #include "sig_scan.h"
 
@@ -35,8 +36,10 @@ void LoadFromGamedata(const nlohmann::json& gd)
     g_vtIdxDropWeapon = sig::FindPlatformOffset(gd, "vtidx::DropWeapon", g_vtIdxDropWeapon);
 }
 
+namespace {
+
 // Resolves one required Schema field into its runtime target
-static bool ResolveRequired(int& target, const char* className, const char* fieldName, char* errorOut, size_t errorOutLen)
+bool ResolveRequired(int& target, const char* className, const char* fieldName, char* errorOut, size_t errorOutLen)
 {
     const int offset = schema::GetFieldOffset(className, fieldName);
     if (offset >= 0)
@@ -49,6 +52,8 @@ static bool ResolveRequired(int& target, const char* className, const char* fiel
     return false;
 }
 
+} // namespace
+
 // Resolves every required Schema-backed target or reports the first failure
 bool LoadFromSchema(char* errorOut, size_t errorOutLen)
 {
@@ -60,33 +65,33 @@ bool LoadFromSchema(char* errorOut, size_t errorOutLen)
     };
 
     const RequiredField fields[] = {
-        { &g_botAiTickedFlag, "CCSBot", "m_bEyeAnglesUnderPathFinderControl" },
-        { &g_botPawn, "CBot", "m_pPlayer" },
-        { &g_entIdentity, "CEntityInstance", "m_pEntity" },
-        { &g_entMoveType, "CBaseEntity", "m_MoveType" },
-        { &g_entActualMoveType, "CBaseEntity", "m_nActualMoveType" },
-        { &g_entFlags, "CBaseEntity", "m_fFlags" },
-        { &g_entAbsVelocity, "CBaseEntity", "m_vecAbsVelocity" },
-        { &g_entBodyComponent, "CBaseEntity", "m_CBodyComponent" },
-        { &g_bodySceneNode, "CBodyComponent", "m_pSceneNode" },
-        { &g_nodeAbsOrigin, "CGameSceneNode", "m_vecAbsOrigin" },
-        { &g_pawnWeaponServices, "CBasePlayerPawn", "m_pWeaponServices" },
-        { &g_pawnItemServices, "CBasePlayerPawn", "m_pItemServices" },
-        { &g_pawnMovementServices, "CBasePlayerPawn", "m_pMovementServices" },
-        { &g_pawnController, "CBasePlayerPawn", "m_hController" },
-        { &g_pawnOriginalController, "CCSPlayerPawnBase", "m_hOriginalController" },
-        { &g_pawnViewAngle, "CBasePlayerPawn", "v_angle" },
-        { &g_pawnViewAnglePrevious, "CBasePlayerPawn", "v_anglePrevious" },
-        { &g_pawnServerViewAngleChanges, "CBasePlayerPawn", "m_ServerViewAngleChanges" },
-        { &g_pawnEyeAngles, "CCSPlayerPawn", "m_angEyeAngles" },
-        { &g_wsActiveWeapon, "CPlayer_WeaponServices", "m_hActiveWeapon" },
-        { &g_servicesLadderNormal, "CCSPlayer_MovementServices", "m_vecLadderNormal" },
-        { &g_servicesOldViewAngles, "CPlayer_MovementServices", "m_vecOldViewAngles" },
-        { &g_servicesDucked, "CCSPlayer_MovementServices", "m_bDucked" },
-        { &g_servicesDuckAmount, "CCSPlayer_MovementServices", "m_flDuckAmount" },
-        { &g_servicesDuckSpeed, "CCSPlayer_MovementServices", "m_flDuckSpeed" },
-        { &g_servicesDesiresDuck, "CCSPlayer_MovementServices", "m_bDesiresDuck" },
-        { &g_servicesDucking, "CCSPlayer_MovementServices", "m_bDucking" },
+        { .target = &g_botAiTickedFlag, .className = "CCSBot", .fieldName = "m_bEyeAnglesUnderPathFinderControl" },
+        { .target = &g_botPawn, .className = "CBot", .fieldName = "m_pPlayer" },
+        { .target = &g_entIdentity, .className = "CEntityInstance", .fieldName = "m_pEntity" },
+        { .target = &g_entMoveType, .className = "CBaseEntity", .fieldName = "m_MoveType" },
+        { .target = &g_entActualMoveType, .className = "CBaseEntity", .fieldName = "m_nActualMoveType" },
+        { .target = &g_entFlags, .className = "CBaseEntity", .fieldName = "m_fFlags" },
+        { .target = &g_entAbsVelocity, .className = "CBaseEntity", .fieldName = "m_vecAbsVelocity" },
+        { .target = &g_entBodyComponent, .className = "CBaseEntity", .fieldName = "m_CBodyComponent" },
+        { .target = &g_bodySceneNode, .className = "CBodyComponent", .fieldName = "m_pSceneNode" },
+        { .target = &g_nodeAbsOrigin, .className = "CGameSceneNode", .fieldName = "m_vecAbsOrigin" },
+        { .target = &g_pawnWeaponServices, .className = "CBasePlayerPawn", .fieldName = "m_pWeaponServices" },
+        { .target = &g_pawnItemServices, .className = "CBasePlayerPawn", .fieldName = "m_pItemServices" },
+        { .target = &g_pawnMovementServices, .className = "CBasePlayerPawn", .fieldName = "m_pMovementServices" },
+        { .target = &g_pawnController, .className = "CBasePlayerPawn", .fieldName = "m_hController" },
+        { .target = &g_pawnOriginalController, .className = "CCSPlayerPawnBase", .fieldName = "m_hOriginalController" },
+        { .target = &g_pawnViewAngle, .className = "CBasePlayerPawn", .fieldName = "v_angle" },
+        { .target = &g_pawnViewAnglePrevious, .className = "CBasePlayerPawn", .fieldName = "v_anglePrevious" },
+        { .target = &g_pawnServerViewAngleChanges, .className = "CBasePlayerPawn", .fieldName = "m_ServerViewAngleChanges" },
+        { .target = &g_pawnEyeAngles, .className = "CCSPlayerPawn", .fieldName = "m_angEyeAngles" },
+        { .target = &g_wsActiveWeapon, .className = "CPlayer_WeaponServices", .fieldName = "m_hActiveWeapon" },
+        { .target = &g_servicesLadderNormal, .className = "CCSPlayer_MovementServices", .fieldName = "m_vecLadderNormal" },
+        { .target = &g_servicesOldViewAngles, .className = "CPlayer_MovementServices", .fieldName = "m_vecOldViewAngles" },
+        { .target = &g_servicesDucked, .className = "CCSPlayer_MovementServices", .fieldName = "m_bDucked" },
+        { .target = &g_servicesDuckAmount, .className = "CCSPlayer_MovementServices", .fieldName = "m_flDuckAmount" },
+        { .target = &g_servicesDuckSpeed, .className = "CCSPlayer_MovementServices", .fieldName = "m_flDuckSpeed" },
+        { .target = &g_servicesDesiresDuck, .className = "CCSPlayer_MovementServices", .fieldName = "m_bDesiresDuck" },
+        { .target = &g_servicesDucking, .className = "CCSPlayer_MovementServices", .fieldName = "m_bDucking" },
     };
 
     for (const RequiredField& field : fields)

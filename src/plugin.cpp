@@ -12,8 +12,9 @@
 #include <networksystem/inetworkmessages.h>
 #include <tier0/dbg.h>
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json.hpp> // NOLINT(misc-include-cleaner)
 
+#include "ISmmPluginExt.h"
 #include "WeaponLocker.h"
 #include "BotController.h"
 #include "BuyController.h"
@@ -51,11 +52,14 @@ class BotControllerPlugin : public ISmmPlugin
     const char* GetLogTag() override { return "BC"; }
 };
 
-BotControllerPlugin g_botControllerPlugin;
-PLUGIN_EXPOSE(BotControllerPlugin, g_botControllerPlugin);
+BotControllerPlugin g_botControllerPlugin; // NOLINT(misc-use-internal-linkage)
+PLUGIN_EXPOSE(BotControllerPlugin, // NOLINT(misc-use-internal-linkage,misc-use-anonymous-namespace,bugprone-throwing-static-initialization)
+              g_botControllerPlugin);
+
+namespace {
 
 // addons/<name>/bin/<platform>/<lib> -> up 3 dirs -> addons/<name>/gamedata.json
-static std::string ComputeGamedataPath()
+std::string ComputeGamedataPath()
 {
     std::string p = bot_controller::SelfModulePath();
     if (p.empty()) return "";
@@ -67,6 +71,8 @@ static std::string ComputeGamedataPath()
     }
     return p + "/gamedata.json";
 }
+
+} // namespace
 
 bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool /*late*/)
 {

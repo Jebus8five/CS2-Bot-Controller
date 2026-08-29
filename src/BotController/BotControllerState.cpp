@@ -7,8 +7,12 @@
 
 namespace bot_controller {
 namespace bot_controller_state {
-static std::array<std::atomic<bool>, kMaxSlots> g_allLocks{};
-static std::array<std::atomic<bool>, kMaxSlots> g_aimLocks{};
+
+namespace {
+std::array<std::atomic<bool>, kMaxSlots> g_allLocks{};
+std::array<std::atomic<bool>, kMaxSlots> g_aimLocks{};
+
+} // namespace
 
 bool GetAll(int slot)
 {

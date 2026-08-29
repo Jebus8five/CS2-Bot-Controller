@@ -7,7 +7,11 @@
 
 namespace bot_controller {
 namespace weapon_locker_state {
-static std::array<std::atomic<int>, kMaxSlots> g_locks{};
+
+namespace {
+std::array<std::atomic<int>, kMaxSlots> g_locks{};
+
+} // namespace
 
 LockTarget Get(int slot)
 {

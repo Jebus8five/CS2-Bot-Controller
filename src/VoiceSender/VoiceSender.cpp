@@ -8,12 +8,19 @@
 #include <playerslot.h>
 
 #include <cmath>
+#include <cstdint>
+#include <cstddef>
 
 namespace bot_controller {
 namespace voice_sender {
-static IVEngineServer2* g_engine = nullptr;
-static INetworkMessages* g_networkMessages = nullptr;
-static INetworkMessageInternal* g_voiceMessage = nullptr;
+
+namespace {
+
+IVEngineServer2* g_engine = nullptr;
+INetworkMessages* g_networkMessages = nullptr;
+INetworkMessageInternal* g_voiceMessage = nullptr;
+
+} // namespace
 
 // Store engine interfaces and reset the cached voice message type
 void SetInterfaces(IVEngineServer2* engine, INetworkMessages* networkMessages)
@@ -23,8 +30,10 @@ void SetInterfaces(IVEngineServer2* engine, INetworkMessages* networkMessages)
     g_voiceMessage = nullptr;
 }
 
+namespace {
+
 // Resolve the CSVCMsg_VoiceData network message type lazily
-static INetworkMessageInternal* FindVoiceMessage()
+INetworkMessageInternal* FindVoiceMessage()
 {
     if (g_voiceMessage) return g_voiceMessage;
     if (!g_networkMessages) return nullptr;
@@ -34,6 +43,8 @@ static INetworkMessageInternal* FindVoiceMessage()
     if (!g_voiceMessage) g_voiceMessage = g_networkMessages->FindNetworkMessage("svc_VoiceData");
     return g_voiceMessage;
 }
+
+} // namespace
 
 // Return the current voice sender setup status
 int GetStatus()

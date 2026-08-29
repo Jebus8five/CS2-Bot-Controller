@@ -4,7 +4,7 @@
 
 #include <funchook.h>
 
-#if defined(_MSC_VER)
+#ifdef _MSC_VER
 #define BC_FASTCALL __fastcall
 #else
 #define BC_FASTCALL

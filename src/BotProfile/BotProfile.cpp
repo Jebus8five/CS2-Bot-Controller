@@ -5,6 +5,7 @@
 #include "ccsbot_slot.h"
 #include "version_targets.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace tg = bot_controller::targets;
@@ -33,11 +34,11 @@ bool ReadProfile(int slot, BotProfileData& out)
 
     int count = 0;
     if (!SafeRead(prof, tg::g_profWeaponPrefCount, count)) return false;
-    if (count < 0) count = 0;
-    if (count > 16) count = 16;
+    count = std::max(count, 0);
+    count = std::min(count, 16);
     out.weaponPrefCount = count;
     for (int i = 0; i < count; ++i)
-        if (!SafeRead(prof, tg::g_profWeaponPref + i * 2, out.weaponPref[i])) return false;
+        if (!SafeRead(prof, tg::g_profWeaponPref + (i * 2), out.weaponPref[i])) return false;
     return true;
 }
 } // namespace bot_profile

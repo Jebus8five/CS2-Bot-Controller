@@ -49,17 +49,17 @@ struct ReplayTick
     float eventDropVelocityZ;
 };
 
-enum ReplayEventFlags : uint32_t
+enum ReplayEventFlags : uint32_t // NOLINT(performance-enum-size)
 {
     ReplayEventNone = 0,
-    ReplayEventDrop = 1u << 0,
+    ReplayEventDrop = 1U << 0,
 };
 
-enum ReplayDropVectorFlags : uint32_t
+enum ReplayDropVectorFlags : uint32_t // NOLINT(performance-enum-size)
 {
     ReplayDropVectorNone = 0,
-    ReplayDropVectorTarget = 1u << 0,
-    ReplayDropVectorVelocity = 1u << 1,
+    ReplayDropVectorTarget = 1U << 0,
+    ReplayDropVectorVelocity = 1U << 1,
 };
 
 struct ReplayDropEvent
@@ -126,14 +126,14 @@ static_assert(sizeof(ReplayTick) == 228);
 namespace motion_recorder {
 constexpr int kMaxSlots = 64;
 constexpr int kMaxSubtickPerTick = 36;
-constexpr uint32_t kCommandFieldForwardMove = 1u << 0;
-constexpr uint32_t kCommandFieldLeftMove = 1u << 1;
-constexpr uint32_t kCommandFieldUpMove = 1u << 2;
-constexpr uint32_t kCommandFieldViewAngles = 1u << 3;
-constexpr uint32_t kCommandFieldButtons = 1u << 4;
-constexpr uint32_t kCommandFieldMouse = 1u << 5;
-constexpr uint32_t kCommandFieldWeaponSelect = 1u << 6;
-constexpr uint32_t kCommandFieldLeftHand = 1u << 7;
+constexpr uint32_t kCommandFieldForwardMove = 1U << 0;
+constexpr uint32_t kCommandFieldLeftMove = 1U << 1;
+constexpr uint32_t kCommandFieldUpMove = 1U << 2;
+constexpr uint32_t kCommandFieldViewAngles = 1U << 3;
+constexpr uint32_t kCommandFieldButtons = 1U << 4;
+constexpr uint32_t kCommandFieldMouse = 1U << 5;
+constexpr uint32_t kCommandFieldWeaponSelect = 1U << 6;
+constexpr uint32_t kCommandFieldLeftHand = 1U << 7;
 
 // Complete replay input frame assembled for PlayerRunCommand
 struct ReplayCommandFrame

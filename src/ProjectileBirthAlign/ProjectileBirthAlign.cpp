@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -47,7 +48,7 @@ bool Apply(Pending& pending)
 {
     if (g_initialPositionOffset < 0 || g_initialVelocityOffset < 0) return false;
 
-    void* entity = reinterpret_cast<void*>(static_cast<uintptr_t>(pending.entityPtr));
+    void* entity = reinterpret_cast<void*>(static_cast<uintptr_t>(pending.entityPtr)); // NOLINT(performance-no-int-to-ptr)
     if (!entity) return false;
 
     const size_t vectorSize = sizeof(float) * pending.position.size();
@@ -69,7 +70,7 @@ int ConfigureOffsets(int initialPositionOffset, int initialVelocityOffset)
 {
     if (initialPositionOffset < 0 || initialVelocityOffset < 0) return -2;
 
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::scoped_lock lock(g_mutex);
     g_initialPositionOffset = initialPositionOffset;
     g_initialVelocityOffset = initialVelocityOffset;
     return 0;
@@ -80,7 +81,7 @@ int Queue(uint64_t entityPtr, float posX, float posY, float posZ, float velX, fl
 {
     if (entityPtr == 0) return -2;
 
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::scoped_lock lock(g_mutex);
     if (g_initialPositionOffset < 0 || g_initialVelocityOffset < 0) return -3;
 
     if (static_cast<int>(g_pending.size()) >= kMaxPending)
@@ -89,7 +90,8 @@ int Queue(uint64_t entityPtr, float posX, float posY, float posZ, float velX, fl
         ++g_expired;
     }
 
-    g_pending.push_back({ entityPtr, { posX, posY, posZ }, { velX, velY, velZ }, kMaxAttempts });
+    g_pending.push_back(
+        { .entityPtr = entityPtr, .position = { posX, posY, posZ }, .velocity = { velX, velY, velZ }, .attemptsRemaining = kMaxAttempts });
     g_pendingCount.store(static_cast<int>(g_pending.size()), std::memory_order_release);
     ++g_queued;
     return 0;
@@ -98,7 +100,7 @@ int Queue(uint64_t entityPtr, float posX, float posY, float posZ, float velX, fl
 // Clears pending projectile writes and returns the number removed
 int Clear()
 {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::scoped_lock lock(g_mutex);
     const int cleared = static_cast<int>(g_pending.size());
     g_pending.clear();
     g_pendingCount.store(0, std::memory_order_release);
@@ -108,9 +110,9 @@ int Clear()
 // Copies projectile alignment diagnostics into the caller's status buffer
 int GetStatus(Status* out, int size)
 {
-    if (!out || size < static_cast<int>(sizeof(Status))) return -1;
+    if (!out || size < 0 || static_cast<size_t>(size) < sizeof(Status)) return -1;
 
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::scoped_lock lock(g_mutex);
     Status status{};
     status.size = static_cast<int32_t>(sizeof(Status));
     status.configured = g_initialPositionOffset >= 0 && g_initialVelocityOffset >= 0 ? 1 : 0;
@@ -130,7 +132,7 @@ void ProcessPending()
 {
     if (g_pendingCount.load(std::memory_order_acquire) == 0) return;
 
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::scoped_lock lock(g_mutex);
     for (auto it = g_pending.begin(); it != g_pending.end();)
     {
         if (Apply(*it))

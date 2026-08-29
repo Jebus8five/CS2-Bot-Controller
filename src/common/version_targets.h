@@ -51,8 +51,8 @@ inline int g_entActualMoveType = 0x2F5;
 // m_fFlags (bit0 = FL_ONGROUND, bit1 = FL_DUCKING)
 inline int g_entFlags = 0x388;
 // m_fFlags bit masks restored on replay (constants, not offsets)
-inline constexpr unsigned kFlOnGround = 1u << 0;
-inline constexpr unsigned kFlDucking = 1u << 1;
+inline constexpr unsigned kFlOnGround = 1U << 0;
+inline constexpr unsigned kFlDucking = 1U << 1;
 // m_vecAbsVelocity
 inline int g_entAbsVelocity = 0x38C;
 // entity -> m_CBodyComponent -> m_pSceneNode

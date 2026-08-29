@@ -1,18 +1,27 @@
 // Cross-platform sig scanning + gamedata.json loader
 
 #include "sig_scan.h"
+#include <ios>
+#include <vector>
+#include <cstdint>
 #include "ccsbot_slot.h"
+#include "nlohmann/json.hpp"
 
-#if defined(_WIN32)
-#include <Windows.h>
+#ifdef _WIN32
+#include <Windows.h> // NOLINT(misc-include-cleaner)
+#include <libloaderapi.h>
+#include <memoryapi.h>
+#include <minwindef.h>
+#include <processthreadsapi.h>
 #include <psapi.h>
+#include <winnt.h>
 #else
+#include <algorithm>
 #include <dlfcn.h>
 #include <link.h>
 #include <strings.h>
 #endif
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,7 +35,8 @@ const char* BaseName(const char* path)
     if (!path) return "";
     const char* slash = std::strrchr(path, '/');
     const char* backslash = std::strrchr(path, '\\');
-    const char* base = slash && backslash ? std::max(slash, backslash) : (slash ? slash : backslash);
+    const char* base = slash;
+    if (backslash && (!base || backslash > base)) base = backslash;
     return base ? base + 1 : path;
 }
 
@@ -38,7 +48,7 @@ void SetError(char* out, size_t outLen, const char* fmt, const char* a, const ch
         std::snprintf(out, outLen, fmt, a);
 }
 
-#if defined(_WIN32)
+#ifdef _WIN32
 ModuleInfo ModuleFromHandle(HMODULE handle)
 {
     ModuleInfo out;
@@ -49,7 +59,7 @@ ModuleInfo ModuleFromHandle(HMODULE handle)
 
     out.base = static_cast<unsigned char*>(mi.lpBaseOfDll);
     out.size = static_cast<size_t>(mi.SizeOfImage);
-    out.segments.push_back({ out.base, out.size });
+    out.segments.push_back({ .base = out.base, .size = out.size });
     return out;
 }
 #else
@@ -148,7 +158,7 @@ bool LoadGamedata(const char* path, nlohmann::json& out)
 
 const char* PlatformName()
 {
-#if defined(_WIN32)
+#ifdef _WIN32
     return "windows";
 #else
     return "linux";
@@ -199,7 +209,7 @@ bool ParseSigString(const std::string& sigStr, std::vector<uint8_t>& outBytes, s
             continue;
         }
         char* end = nullptr;
-        unsigned long v = std::strtoul(p, &end, 16);
+        const auto v = std::strtoul(p, &end, 16);
         if (end == p || end - p > 2 || v > 0xFF) return false;
         outBytes.push_back(static_cast<uint8_t>(v));
         outWild.push_back(false);
@@ -236,7 +246,7 @@ void* FindPatternIn(const ModuleInfo& module, const std::vector<uint8_t>& patter
 
 ModuleInfo ModuleFromName(const char* moduleName)
 {
-#if defined(_WIN32)
+#ifdef _WIN32
     return ModuleFromHandle(GetModuleHandleA(moduleName));
 #else
     FindByNameCtx ctx{};
@@ -252,7 +262,7 @@ ModuleInfo ModuleFromInterfacePtr(void* interfacePtr)
     void* vtable = nullptr;
     if (!GuardedRead(interfacePtr, 0, vtable) || !vtable) return {};
 
-#if defined(_WIN32)
+#ifdef _WIN32
     MEMORY_BASIC_INFORMATION mbi{};
     if (!VirtualQuery(vtable, &mbi, sizeof(mbi))) return {};
     if (mbi.Type != MEM_IMAGE) return {};
