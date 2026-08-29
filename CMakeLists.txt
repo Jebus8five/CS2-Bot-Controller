@@ -7,6 +7,47 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+find_program(CLANG_FORMAT_EXECUTABLE NAMES clang-format clang-format.exe)
+file(GLOB_RECURSE BOT_CONTROLLER_FORMAT_FILES
+    CONFIGURE_DEPENDS
+    LIST_DIRECTORIES false
+    "${CMAKE_SOURCE_DIR}/src/*.c"
+    "${CMAKE_SOURCE_DIR}/src/*.cc"
+    "${CMAKE_SOURCE_DIR}/src/*.cpp"
+    "${CMAKE_SOURCE_DIR}/src/*.cxx"
+    "${CMAKE_SOURCE_DIR}/src/*.h"
+    "${CMAKE_SOURCE_DIR}/src/*.hh"
+    "${CMAKE_SOURCE_DIR}/src/*.hpp"
+    "${CMAKE_SOURCE_DIR}/src/*.hxx"
+    "${CMAKE_SOURCE_DIR}/src/*.inl"
+)
+
+option(ENABLE_FORMAT_CHECK "Run clang-format check before building BotController" OFF)
+
+if(CLANG_FORMAT_EXECUTABLE)
+    add_custom_target(format
+        COMMAND "${CLANG_FORMAT_EXECUTABLE}" -i --style=file ${BOT_CONTROLLER_FORMAT_FILES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Formatting BotController sources"
+        VERBATIM
+    )
+    add_custom_target(format-check
+        COMMAND "${CLANG_FORMAT_EXECUTABLE}" --dry-run --Werror --style=file ${BOT_CONTROLLER_FORMAT_FILES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Checking BotController source formatting"
+        VERBATIM
+    )
+else()
+    add_custom_target(format
+        COMMAND ${CMAKE_COMMAND} -E echo "clang-format was not found. Set CLANG_FORMAT_EXECUTABLE."
+        COMMAND ${CMAKE_COMMAND} -E false
+    )
+    add_custom_target(format-check
+        COMMAND ${CMAKE_COMMAND} -E echo "clang-format was not found. Set CLANG_FORMAT_EXECUTABLE."
+        COMMAND ${CMAKE_COMMAND} -E false
+    )
+endif()
+
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "BotController requires x64 build (use -A x64).")
 endif()
@@ -165,6 +206,10 @@ add_library(
     ${PROTO_SRCS}
     ${SDK_SOURCES}
 )
+
+if(ENABLE_FORMAT_CHECK)
+    add_dependencies(BotController format-check)
+endif()
 
 target_include_directories(
     BotController
