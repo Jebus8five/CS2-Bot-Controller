@@ -5,7 +5,7 @@
 #include <array>
 #include <atomic>
 
-namespace bot_controller {
+namespace cs2bc {
 namespace bot_controller_state {
 
 namespace {
@@ -66,4 +66,4 @@ int CountAim()
     return n;
 }
 } // namespace bot_controller_state
-} // namespace bot_controller
+} // namespace cs2bc

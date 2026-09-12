@@ -19,7 +19,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace bot_controller::schema {
+namespace cs2bc::schema {
 using CreateInterfaceFn = void* (*)(const char*, int*);
 
 namespace {
@@ -164,4 +164,4 @@ void Reset()
     g_schemaSystem = nullptr;
 }
 
-} // namespace bot_controller::schema
+} // namespace cs2bc::schema

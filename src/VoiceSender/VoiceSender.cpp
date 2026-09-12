@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace bot_controller {
+namespace cs2bc {
 namespace voice_sender {
 
 namespace {
@@ -114,4 +114,4 @@ int SendVoiceFrame(int recipientSlot,
     return ok ? 0 : -6;
 }
 } // namespace voice_sender
-} // namespace bot_controller
+} // namespace cs2bc

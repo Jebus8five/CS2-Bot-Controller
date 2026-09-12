@@ -8,7 +8,7 @@
 
 #include <eiface.h>
 
-namespace bot_controller {
+namespace cs2bc {
 namespace dispatch {
 IVEngineServer2* g_engine = nullptr;
 ISource2GameClients* g_gameClients = nullptr;
@@ -99,4 +99,4 @@ int IsLocked(int slot, LockKind kind)
     return 0;
 }
 } // namespace dispatch
-} // namespace bot_controller
+} // namespace cs2bc

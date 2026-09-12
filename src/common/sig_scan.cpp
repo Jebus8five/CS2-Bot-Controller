@@ -28,7 +28,7 @@
 #include <fstream>
 #include <string>
 
-namespace bot_controller::sig {
+namespace cs2bc::sig {
 namespace {
 const char* BaseName(const char* path)
 {
@@ -298,4 +298,4 @@ void* ResolveSig(const nlohmann::json& gamedata, const ModuleInfo& module, const
     }
     return addr;
 }
-} // namespace bot_controller::sig
+} // namespace cs2bc::sig

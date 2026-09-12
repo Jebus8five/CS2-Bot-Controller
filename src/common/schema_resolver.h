@@ -4,7 +4,7 @@
 
 #include <cstddef>
 
-namespace bot_controller::schema {
+namespace cs2bc::schema {
 
 // Resolves the live SchemaSystem interface and server type scope
 bool Init(char* errorOut, size_t errorOutLen);
@@ -15,4 +15,4 @@ int GetFieldOffset(const char* className, const char* fieldName);
 // Clears the cached interface, type scope, and field offsets
 void Reset();
 
-} // namespace bot_controller::schema
+} // namespace cs2bc::schema

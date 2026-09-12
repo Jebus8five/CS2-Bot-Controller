@@ -9,7 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace bot_controller::sig {
+namespace cs2bc::sig {
 struct ModuleSegment
 {
     unsigned char* base = nullptr;
@@ -38,4 +38,4 @@ ModuleInfo ModuleFromName(const char* moduleName);
 ModuleInfo ModuleFromInterfacePtr(void* interfacePtr);
 // Resolve sig from gamedata against module; errorOut on failure
 void* ResolveSig(const nlohmann::json& gamedata, const ModuleInfo& module, const char* name, char* errorOut, size_t errorOutLen);
-} // namespace bot_controller::sig
+} // namespace cs2bc::sig

@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace bot_controller {
+namespace cs2bc {
 // State of the player at one boundary of a movement tick. Captured twice
 // per tick: pre (before the mover runs) and post (after).
 #pragma pack(push, 4)
@@ -271,4 +271,4 @@ void OnReplayCommit(int slot, void* services);
 
 void ClearAll(); // wipe all record + replay buffers (on unload)
 } // namespace motion_recorder
-} // namespace bot_controller
+} // namespace cs2bc

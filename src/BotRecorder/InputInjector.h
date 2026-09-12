@@ -1,4 +1,4 @@
-// funchook for CS2 movement functions (ProcessMovement / PhysicsSimulate / FinishMove / PlayerRunCommand)
+// KHook for CS2 movement functions (ProcessMovement / PhysicsSimulate / FinishMove / PlayerRunCommand)
 
 #pragma once
 
@@ -8,7 +8,7 @@
 #include <nlohmann/json.hpp>
 #include "sig_scan.h"
 
-namespace bot_controller {
+namespace cs2bc {
 namespace input_injector {
 // Max bots we track per-slot state for.
 static constexpr int kMaxSlots = 64;
@@ -82,4 +82,4 @@ int LastControllerIndex();
 int LastOriginalControllerIndex();
 int LastOwnerSlot();
 } // namespace input_injector
-} // namespace bot_controller
+} // namespace cs2bc

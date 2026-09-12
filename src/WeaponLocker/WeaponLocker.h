@@ -7,7 +7,7 @@
 #include <nlohmann/json.hpp>
 #include "sig_scan.h"
 
-namespace bot_controller {
+namespace cs2bc {
 namespace weapon_locker_hooks {
 // Sentinel def index meaning any knife
 constexpr int kKnifeDef = 9001;
@@ -50,4 +50,4 @@ bool SelectWeaponRaw(void* ws, void* weapon);
 // Cached WeaponServices* for a bot slot
 void* WsForSlot(int slot);
 } // namespace weapon_locker_hooks
-} // namespace bot_controller
+} // namespace cs2bc

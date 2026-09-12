@@ -2,7 +2,7 @@
 
 #pragma once
 
-namespace bot_controller {
+namespace cs2bc {
 // Engine weapon slots
 // Slot1 = primary
 // Slot2 = pistol
@@ -30,4 +30,4 @@ void ClearAll();
 // Returns count of currently locked slots.
 int CountLocked();
 } // namespace weapon_locker_state
-} // namespace bot_controller
+} // namespace cs2bc

@@ -20,9 +20,9 @@
 #include <unistd.h>
 #endif
 
-namespace tg = bot_controller::targets;
+namespace tg = cs2bc::targets;
 
-namespace bot_controller {
+namespace cs2bc {
 
 namespace {
 int EntIndexFromHandle(uint32_t h)
@@ -206,4 +206,4 @@ int ControllerToSlot(void* controller)
     if (idx < 1 || idx > 64) return -1;
     return idx - 1;
 }
-} // namespace bot_controller
+} // namespace cs2bc

@@ -6,7 +6,7 @@
 #include "InputInjector.h"
 #include "WeaponLocker.h"
 #include "ccsbot_slot.h"
-#include "hook.h"
+#include "hooks.h"
 #include "version_targets.h"
 
 #include <algorithm>
@@ -22,9 +22,9 @@
 #include <eiface.h>
 #include <playerslot.h>
 
-namespace tg = bot_controller::targets;
+namespace tg = cs2bc::targets;
 
-namespace bot_controller {
+namespace cs2bc {
 namespace motion_recorder {
 #ifdef _WIN32
 using DropWeaponResult = uint8_t;
@@ -100,8 +100,16 @@ std::atomic<void*> g_lastDropHookVelocity{ nullptr };
 std::atomic<int> g_lastDropReplaySlot{ -1 };
 std::atomic<int> g_lastDropReplayWeaponDef{ -1 };
 std::atomic<uint32_t> g_lastDropReplayVectorFlags{ ReplayDropVectorNone };
-Hook g_hookDropWeapon;
-DropWeaponT g_origDropWeapon = nullptr;
+hooks::NativeHook<DropWeaponResult, void*, void*, void*, void*> g_hookDropWeapon;
+struct DropFrame
+{
+    void* weaponServices;
+    void* weapon;
+    int recordingSlot;
+    int weaponDefIndex;
+    ReplayDropEvent recordedEvent;
+};
+thread_local std::vector<DropFrame> g_dropFrames;
 void* g_addrDropWeapon = nullptr;
 std::atomic<bool> g_dropHookTried{ false };
 std::atomic<bool> g_dropHookReady{ false };
@@ -168,8 +176,8 @@ bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
     return true;
 }
 
-// Captures only calls that actually detach the supplied weapon from its owner
-DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void* weapon, void* target, void* velocity)
+// Captures drop inputs and recalls the remaining hooks when replay changes vectors.
+KHook::Return<DropWeaponResult> HookedDropWeapon(void* weaponServices, void* weapon, void* target, void* velocity) noexcept
 {
     g_dropHookCallCount.fetch_add(1, std::memory_order_relaxed);
 
@@ -223,7 +231,18 @@ DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void* weapon
     g_lastDropHookTarget.store(effectiveTarget, std::memory_order_relaxed);
     g_lastDropHookVelocity.store(effectiveVelocity, std::memory_order_relaxed);
 
-    const DropWeaponResult result = g_origDropWeapon(weaponServices, weapon, effectiveTarget, effectiveVelocity);
+    g_dropFrames.push_back({ weaponServices, weapon, recordingSlot, weaponDefIndex, recordedEvent });
+    if (effectiveTarget != target || effectiveVelocity != velocity)
+        return KHook::Recall(reinterpret_cast<DropWeaponT>(g_addrDropWeapon), KHook::Return<DropWeaponResult>{ KHook::Action::Ignore },
+                             weaponServices, weapon, effectiveTarget, effectiveVelocity);
+    return { KHook::Action::Ignore };
+}
+
+// Records only physical detachments and preserves the engine's return value.
+KHook::Return<DropWeaponResult> DropWeaponPost(void*, void*, void*, void*) noexcept
+{
+    const auto [weaponServices, weapon, recordingSlot, weaponDefIndex, recordedEvent] = g_dropFrames.back();
+    g_dropFrames.pop_back();
     const bool detached =
         weaponServices && weapon && weaponDefIndex >= 0 && weapon_locker_hooks::FindWeaponByDef(weaponServices, weaponDefIndex) != weapon;
     if (detached && ValidSlot(recordingSlot))
@@ -248,7 +267,7 @@ DropWeaponResult BC_FASTCALL HookedDropWeapon(void* weaponServices, void* weapon
         if (!found) r.pendingDropCandidates.push_back({ .weapon = weapon, .event = recordedEvent });
     }
     if (detached && ValidSlot(g_activeReplayDropSlot)) g_dropReplayDetachedCount.fetch_add(1, std::memory_order_relaxed);
-    return result;
+    return { KHook::Action::Ignore };
 }
 
 // Installs the drop hook from a live weapon-services vtable once
@@ -262,16 +281,13 @@ void EnsureDropWeaponHook(void* weaponServices)
         !g_addrDropWeapon)
         return;
 
-    if (g_hookDropWeapon.Create(g_addrDropWeapon, reinterpret_cast<void*>(&HookedDropWeapon),
-                                reinterpret_cast<void**>(&g_origDropWeapon)) &&
-        g_hookDropWeapon.Enable())
+    if (g_hookDropWeapon.Install(g_addrDropWeapon, &HookedDropWeapon, &DropWeaponPost))
     {
         g_dropHookReady.store(true, std::memory_order_release);
         return;
     }
 
     g_hookDropWeapon.Remove();
-    g_origDropWeapon = nullptr;
     g_addrDropWeapon = nullptr;
 }
 
@@ -1196,7 +1212,6 @@ void ClearAll()
 {
     g_dropHookReady.store(false, std::memory_order_release);
     g_hookDropWeapon.Remove();
-    g_origDropWeapon = nullptr;
     g_addrDropWeapon = nullptr;
     g_dropHookTried.store(false, std::memory_order_release);
     for (int i = 0; i < kMaxSlots; ++i)
@@ -1234,4 +1249,4 @@ void ClearAll()
     }
 }
 } // namespace motion_recorder
-} // namespace bot_controller
+} // namespace cs2bc

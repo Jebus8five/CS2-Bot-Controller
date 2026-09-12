@@ -5,7 +5,7 @@
 #include <array>
 #include <atomic>
 
-namespace bot_controller {
+namespace cs2bc {
 namespace weapon_locker_state {
 
 namespace {
@@ -41,4 +41,4 @@ int CountLocked()
     return n;
 }
 } // namespace weapon_locker_state
-} // namespace bot_controller
+} // namespace cs2bc

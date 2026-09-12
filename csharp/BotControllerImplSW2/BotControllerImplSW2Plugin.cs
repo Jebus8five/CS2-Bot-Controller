@@ -19,7 +19,7 @@ namespace BotControllerImplSW2;
 
 [PluginMetadata(
     Id = "botcontroller.sw2",
-    Version = "0.6.3",
+    Version = "0.7.0",
     Name = "BotController",
     Author = "XBribo & nicedayzhu",
     Description = "Record & Replay and Control CS2 bots."

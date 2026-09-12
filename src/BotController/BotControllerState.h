@@ -2,7 +2,7 @@
 
 #pragma once
 
-namespace bot_controller {
+namespace cs2bc {
 namespace bot_controller_state {
 constexpr int kMaxSlots = 64;
 
@@ -18,4 +18,4 @@ void SetAim(int slot, bool locked);
 void ClearAllAim();
 int CountAim();
 } // namespace bot_controller_state
-} // namespace bot_controller
+} // namespace cs2bc

@@ -10,7 +10,7 @@
 #include <mutex>
 #include <vector>
 
-namespace bot_controller::projectile_birth_align {
+namespace cs2bc::projectile_birth_align {
 namespace {
 constexpr int kMaxPending = 64;
 constexpr int kMaxAttempts = 4;
@@ -155,4 +155,4 @@ void ProcessPending()
     }
     g_pendingCount.store(static_cast<int>(g_pending.size()), std::memory_order_release);
 }
-} // namespace bot_controller::projectile_birth_align
+} // namespace cs2bc::projectile_birth_align

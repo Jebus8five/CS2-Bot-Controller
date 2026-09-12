@@ -7,7 +7,7 @@
 class IVEngineServer2;
 class ISource2GameClients;
 
-namespace bot_controller {
+namespace cs2bc {
 // Mirror BotControllerApi.LockKind on the C# side.
 enum class LockKind : int // NOLINT(performance-enum-size)
 {
@@ -31,4 +31,4 @@ int UnlockAll(LockKind kind);
 // 1 if All/Aim locked; Weapon returns LockTarget int.
 int IsLocked(int slot, LockKind kind);
 } // namespace dispatch
-} // namespace bot_controller
+} // namespace cs2bc

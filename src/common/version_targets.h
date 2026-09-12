@@ -6,7 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace bot_controller::targets {
+namespace cs2bc::targets {
 // ---- CCSBot ----
 
 // AI-ran-this-tick byte flag; set to 1 to fake a completed tick
@@ -133,4 +133,4 @@ void LoadFromGamedata(const nlohmann::json& gd);
 // Resolves every required Schema-backed target or reports the first failure
 bool LoadFromSchema(char* errorOut, size_t errorOutLen);
 
-} // namespace bot_controller::targets
+} // namespace cs2bc::targets

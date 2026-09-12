@@ -7,7 +7,7 @@
 #include <nlohmann/json.hpp>
 #include "sig_scan.h"
 
-namespace bot_controller {
+namespace cs2bc {
 namespace bot_controller_hooks {
 // Resolve sigs and install detours.
 bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen);
@@ -28,4 +28,4 @@ bool ApplyReplayEyeAngles(void* pawn, float pitch, float yaw);
 // the bot's BotProfile by slot.
 void* BotForSlot(int slot);
 } // namespace bot_controller_hooks
-} // namespace bot_controller
+} // namespace cs2bc

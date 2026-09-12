@@ -12,7 +12,7 @@
 #include <dlfcn.h>
 #endif
 
-namespace bot_controller {
+namespace cs2bc {
 // Resolve the on-disk path of the module containing this function
 std::string SelfModulePath()
 {
@@ -30,4 +30,4 @@ std::string SelfModulePath()
     return std::string(info.dli_fname);
 #endif
 }
-} // namespace bot_controller
+} // namespace cs2bc

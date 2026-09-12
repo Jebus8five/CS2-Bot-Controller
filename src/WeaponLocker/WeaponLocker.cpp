@@ -8,7 +8,7 @@
 #include "ccsbot_slot.h"
 #include "MotionRecorder.h"
 #include "version_targets.h"
-#include "hook.h"
+#include "hooks.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -16,20 +16,14 @@
 #include <mutex>
 #include <unordered_map>
 
-namespace tg = bot_controller::targets;
+namespace tg = cs2bc::targets;
 
-using EquipBestWeaponT = void(BC_FASTCALL*)(void* self, char mustEquip);
-using EquipPistolT = void(BC_FASTCALL*)(void* self, char mustEquip);
-using SelectItemT = char(BC_FASTCALL*)(void* ws, void* weapon, int flag);
 using GetSlotT = void*(BC_FASTCALL*)(void* ws, int slot, unsigned int mask);
 
-namespace bot_controller {
+namespace cs2bc {
 namespace weapon_locker_hooks {
 
 namespace {
-EquipBestWeaponT g_origEquipBestWeapon = nullptr;
-EquipPistolT g_origEquipPistol = nullptr;
-SelectItemT g_origSelectItem = nullptr;
 GetSlotT g_getSlot = nullptr;
 
 void* g_addrEquipBestWeapon = nullptr;
@@ -37,9 +31,9 @@ void* g_addrEquipPistol = nullptr;
 void* g_addrSelectItem = nullptr;
 void* g_addrGetSlot = nullptr;
 
-Hook g_hookEquipBestWeapon;
-Hook g_hookEquipPistol;
-Hook g_hookSelectItem;
+hooks::NativeHook<void, void*, char> g_hookEquipBestWeapon;
+hooks::NativeHook<void, void*, char> g_hookEquipPistol;
+hooks::NativeHook<char, void*, void*, int> g_hookSelectItem;
 
 std::string g_status = "not_attempted"; // NOLINT(bugprone-throwing-static-initialization)
 bool g_installed = false;
@@ -89,27 +83,30 @@ bool IsGrenadeDef(int def) { return def >= 43 && def <= 48; }
 
 // ---- detours ----
 
-void BC_FASTCALL HookedEquipBestWeapon(void* bot, char mustEquip)
+// Blocks automatic weapon selection while a lock or replay owns it.
+KHook::Return<void> HookedEquipBestWeapon(void* bot, char mustEquip) noexcept
 {
     auto sr = ResolveSlot(bot);
     if (sr.slot >= 0) RememberWsForBot(bot, sr.slot);
-    if (sr.slot >= 0 && motion_recorder::IsReplaying(sr.slot)) return;
+    if (sr.slot >= 0 && motion_recorder::IsReplaying(sr.slot)) return { KHook::Action::Supersede };
     LockTarget lt = (sr.slot >= 0) ? weapon_locker_state::Get(sr.slot) : LockTarget::None;
-    if (lt != LockTarget::None) return;
-    g_origEquipBestWeapon(bot, mustEquip);
+    if (lt != LockTarget::None) return { KHook::Action::Supersede };
+    return { KHook::Action::Ignore };
 }
 
-void BC_FASTCALL HookedEquipPistol(void* bot, char mustEquip)
+// Applies the same ownership rule to pistol selection.
+KHook::Return<void> HookedEquipPistol(void* bot, char mustEquip) noexcept
 {
     auto sr = ResolveSlot(bot);
     if (sr.slot >= 0) RememberWsForBot(bot, sr.slot);
-    if (sr.slot >= 0 && motion_recorder::IsReplaying(sr.slot)) return;
+    if (sr.slot >= 0 && motion_recorder::IsReplaying(sr.slot)) return { KHook::Action::Supersede };
     LockTarget lt = (sr.slot >= 0) ? weapon_locker_state::Get(sr.slot) : LockTarget::None;
-    if (lt != LockTarget::None) return;
-    g_origEquipPistol(bot, mustEquip);
+    if (lt != LockTarget::None) return { KHook::Action::Supersede };
+    return { KHook::Action::Ignore };
 }
 
-char BC_FASTCALL HookedSelectItem(void* ws, void* weapon, int flag)
+// Records weapon changes and rejects switches away from the locked slot.
+KHook::Return<char> HookedSelectItem(void* ws, void* weapon, int flag) noexcept
 {
     // Recording : a human switching weapons calls SelectItem
     if (weapon)
@@ -123,32 +120,32 @@ char BC_FASTCALL HookedSelectItem(void* ws, void* weapon, int flag)
     }
 
     WsBinding bind = LookupBindingForWs(ws);
-    if (bind.slot < 0) return g_origSelectItem(ws, weapon, flag);
+    if (bind.slot < 0) return { KHook::Action::Ignore };
 
     // Human took over this pawn -> current m_hController != bot slot
     // we cached; don't block player's weapon switches.
     int curSlot = ControllerSlotForPawn(bind.pawn);
-    if (curSlot != bind.slot) return g_origSelectItem(ws, weapon, flag);
+    if (curSlot != bind.slot) return { KHook::Action::Ignore };
 
-    if (motion_recorder::IsReplaying(bind.slot)) return g_origSelectItem(ws, weapon, flag);
+    if (motion_recorder::IsReplaying(bind.slot)) return { KHook::Action::Ignore };
 
     LockTarget lt = weapon_locker_state::Get(bind.slot);
-    if (lt == LockTarget::None) return g_origSelectItem(ws, weapon, flag);
+    if (lt == LockTarget::None) return { KHook::Action::Ignore };
 
     int engineSlot = LockTargetToEngineSlot(lt);
-    if (engineSlot < 0 || !g_getSlot) return g_origSelectItem(ws, weapon, flag);
+    if (engineSlot < 0 || !g_getSlot) return { KHook::Action::Ignore };
 
-    if (engineSlot == 3 && weapon && IsGrenadeDef(ReadDefIndex(weapon))) return g_origSelectItem(ws, weapon, flag);
+    if (engineSlot == 3 && weapon && IsGrenadeDef(ReadDefIndex(weapon))) return { KHook::Action::Ignore };
 
     void* targetWeapon = g_getSlot(ws, engineSlot, 0xFFFFFFFFU);
     // No weapon in the locked slot -> can't enforce, let it through.
-    if (!targetWeapon) return g_origSelectItem(ws, weapon, flag);
+    if (!targetWeapon) return { KHook::Action::Ignore };
 
     // Switch is to the lock target -> allow.
-    if (weapon == targetWeapon) return g_origSelectItem(ws, weapon, flag);
+    if (weapon == targetWeapon) return { KHook::Action::Ignore };
 
     // Switch is to something else -> block.
-    return 0;
+    return { KHook::Action::Supersede, 0 };
 }
 
 // ---- install / remove ----
@@ -191,36 +188,25 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
         g_hookEquipBestWeapon.Remove();
         g_hookEquipPistol.Remove();
         g_hookSelectItem.Remove();
-        g_origEquipBestWeapon = nullptr;
-        g_origEquipPistol = nullptr;
-        g_origSelectItem = nullptr;
         return false;
     };
 
-    if (!g_hookEquipBestWeapon.Create(g_addrEquipBestWeapon, reinterpret_cast<void*>(&HookedEquipBestWeapon),
-                                      reinterpret_cast<void**>(&g_origEquipBestWeapon)))
+    if (!g_hookEquipBestWeapon.Install(g_addrEquipBestWeapon, &HookedEquipBestWeapon))
     {
         g_status = "failed: Create EquipBestWeapon";
         return failCleanup("Create EquipBestWeapon");
     }
 
-    if (!g_hookEquipPistol.Create(g_addrEquipPistol, reinterpret_cast<void*>(&HookedEquipPistol),
-                                  reinterpret_cast<void**>(&g_origEquipPistol)))
+    if (!g_hookEquipPistol.Install(g_addrEquipPistol, &HookedEquipPistol))
     {
         g_status = "failed: Create EquipPistol";
         return failCleanup("Create EquipPistol");
     }
 
-    if (!g_hookSelectItem.Create(g_addrSelectItem, reinterpret_cast<void*>(&HookedSelectItem), reinterpret_cast<void**>(&g_origSelectItem)))
+    if (!g_hookSelectItem.Install(g_addrSelectItem, &HookedSelectItem))
     {
         g_status = "failed: Create SelectItem";
         return failCleanup("Create SelectItem");
-    }
-
-    if (!g_hookEquipBestWeapon.Enable() || !g_hookEquipPistol.Enable() || !g_hookSelectItem.Enable())
-    {
-        g_status = "failed: Enable";
-        return failCleanup("Enable");
     }
 
     g_installed = true;
@@ -234,9 +220,6 @@ void Remove()
     g_hookSelectItem.Remove();
     g_hookEquipPistol.Remove();
     g_hookEquipBestWeapon.Remove();
-    g_origEquipBestWeapon = nullptr;
-    g_origEquipPistol = nullptr;
-    g_origSelectItem = nullptr;
     g_installed = false;
     g_status = "not_attempted";
     {
@@ -255,7 +238,7 @@ void* GetSlotAddress() { return g_addrGetSlot; }
 
 // ---- MotionRecorder helpers ----
 
-bool WeaponHooksReady() { return g_installed && g_getSlot && g_origSelectItem; }
+bool WeaponHooksReady() { return g_installed && g_getSlot && g_hookSelectItem.Active(); }
 
 int ReadDefIndex(void* weapon)
 {
@@ -337,8 +320,8 @@ void* FindWeaponByDef(void* ws, int def)
 
 bool SelectWeaponRaw(void* ws, void* weapon)
 {
-    if (!ws || !weapon || !g_origSelectItem) return false;
-    g_origSelectItem(ws, weapon, 0);
+    if (!ws || !weapon || !g_hookSelectItem.Active()) return false;
+    g_hookSelectItem.CallOriginal(ws, weapon, 0);
     return true;
 }
 
@@ -351,7 +334,7 @@ void* WsForSlot(int slot)
 
 int SwitchToLockTarget(int slot)
 {
-    if (!g_installed || !g_origSelectItem || !g_getSlot) return 3;
+    if (!g_installed || !g_hookSelectItem.Active() || !g_getSlot) return 3;
     if (slot < 0 || slot >= 64) return 3;
     if (motion_recorder::IsReplaying(slot)) return 4;
 
@@ -372,8 +355,8 @@ int SwitchToLockTarget(int slot)
 
     // Route through the original (un-hooked) function so we don't
     // ping-pong through HookedSelectItem.
-    g_origSelectItem(ws, target, 0);
+    g_hookSelectItem.CallOriginal(ws, target, 0);
     return 0;
 }
 } // namespace weapon_locker_hooks
-} // namespace bot_controller
+} // namespace cs2bc

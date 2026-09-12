@@ -7,7 +7,7 @@
 #include <vector>
 #include <string>
 
-namespace bot_controller {
+namespace cs2bc {
 namespace buy_controller_state {
 
 namespace {
@@ -78,4 +78,4 @@ int CountPlans()
     return n;
 }
 } // namespace buy_controller_state
-} // namespace bot_controller
+} // namespace cs2bc

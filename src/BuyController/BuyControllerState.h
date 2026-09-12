@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace bot_controller {
+namespace cs2bc {
 /* One bot's buy plan: skip=true means buy nothing this round */
 struct BuyPlan
 {
@@ -34,4 +34,4 @@ int ItemCount(int slot);
 // Count of slots with a plan
 int CountPlans();
 } // namespace buy_controller_state
-} // namespace bot_controller
+} // namespace cs2bc

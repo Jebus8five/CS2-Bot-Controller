@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace bot_controller::projectile_birth_align {
+namespace cs2bc::projectile_birth_align {
 #pragma pack(push, 4)
 struct Status
 {
@@ -34,4 +34,4 @@ int GetStatus(Status* out, int size);
 
 // Applies pending projectile birth writes from a native simulation hook
 void ProcessPending();
-} // namespace bot_controller::projectile_birth_align
+} // namespace cs2bc::projectile_birth_align

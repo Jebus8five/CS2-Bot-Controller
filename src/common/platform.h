@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace bot_controller {
+namespace cs2bc {
 // Absolute path of this shared library on disk; empty on failure
 std::string SelfModulePath();
-} // namespace bot_controller
+} // namespace cs2bc

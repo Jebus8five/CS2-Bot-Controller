@@ -5,7 +5,7 @@
 #include <nlohmann/json.hpp>
 #include "sig_scan.h"
 
-namespace bot_controller {
+namespace cs2bc {
 namespace buy_controller_hooks {
 // Resolve sig + offsets and install the detour.
 bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen);
@@ -16,4 +16,4 @@ const char* Status();
 
 void* OnUpdateAddress();
 } // namespace buy_controller_hooks
-} // namespace bot_controller
+} // namespace cs2bc

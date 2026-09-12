@@ -14,7 +14,7 @@
 #include "ProjectileBirthAlign.h"
 #include "usercmd.pb.h"
 #include "version_targets.h"
-#include "hook.h"
+#include "hooks.h"
 
 #include <algorithm> // NOLINT(misc-include-cleaner)
 #include <array>
@@ -29,14 +29,9 @@
 
 #include <tier0/dbg.h>
 
-namespace tg = bot_controller::targets;
+namespace tg = cs2bc::targets;
 
-using ProcessMovementT = void(BC_FASTCALL*)(void* services, void* moveData);
-using FinishMoveT = void(BC_FASTCALL*)(void* services, void* cmd, void* moveData);
-using PlayerRunCommandT = void(BC_FASTCALL*)(void* services, void* cmd);
-using PhysicsSimulateT = void(BC_FASTCALL*)(void* controller);
-
-namespace bot_controller {
+namespace cs2bc {
 namespace input_injector {
 
 namespace {
@@ -47,20 +42,27 @@ constexpr uint64_t kInMoveLeft = 1ULL << 9;
 constexpr uint64_t kInMoveRight = 1ULL << 10;
 constexpr uint64_t kMovementButtonMask = kInForward | kInBack | kInMoveLeft | kInMoveRight;
 
-ProcessMovementT g_origProcessMovement = nullptr;
-FinishMoveT g_origFinishMove = nullptr;
-PlayerRunCommandT g_origPlayerRunCommand = nullptr;
-PhysicsSimulateT g_origPhysicsSimulate = nullptr;
-
 void* g_addrProcessMovement = nullptr;
 void* g_addrFinishMove = nullptr;
 void* g_addrPlayerRunCommand = nullptr;
 void* g_addrPhysicsSimulate = nullptr;
 
-Hook g_hookProcessMovement;
-Hook g_hookFinishMove;
-Hook g_hookPlayerRunCommand;
-Hook g_hookPhysicsSimulate;
+hooks::NativeHook<void, void*, void*> g_hookProcessMovement;
+hooks::NativeHook<void, void*, void*, void*> g_hookFinishMove;
+hooks::NativeHook<void, void*, void*> g_hookPlayerRunCommand;
+hooks::NativeHook<void, void*> g_hookPhysicsSimulate;
+
+struct MovementFrame
+{
+    int slot;
+    void* services;
+    void* moveData;
+    bool recording;
+    bool replaying;
+};
+thread_local std::vector<MovementFrame> g_processFrames;
+thread_local std::vector<MovementFrame> g_finishFrames;
+thread_local std::vector<MovementFrame> g_physicsFrames;
 bool g_installed = false;
 // True once PhysicsSimulate is hooked
 bool g_physicsActive = false;
@@ -606,7 +608,8 @@ void ApplyReplayDrop(int slot, void* services)
 // Defined after HookedFinishMove
 void EnsureVtableHooks(void* services);
 
-void BC_FASTCALL HookedProcessMovement(void* services, void* moveData)
+// Captures the pre-state and retains invocation-local recording ownership.
+KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexcept
 {
     g_hookCalls.fetch_add(1, std::memory_order_relaxed);
     int slot = ServicesToSlot(services);
@@ -631,15 +634,25 @@ void BC_FASTCALL HookedProcessMovement(void* services, void* moveData)
     // Replay: seed CMoveData + pawn with this tick's pre snapshot
     if (replaying) motion_recorder::OnReplayPre(slot, services, moveData);
 
-    g_origProcessMovement(services, moveData);
+    g_processFrames.push_back({ slot, services, moveData, recording, replaying });
+    return { KHook::Action::Ignore };
+}
+
+// Completes the matching movement capture after the engine call.
+KHook::Return<void> ProcessMovementPost(void*, void*) noexcept
+{
+    const auto [slot, services, moveData, recording, replaying] = g_processFrames.back();
+    g_processFrames.pop_back();
 
     // Recording: commit the tick here only when PhysicsSimulate isn't the boundary
     if (recording && !g_physicsActive) motion_recorder::OnCapturePost(slot, services, moveData);
+    return { KHook::Action::Ignore };
 }
 
 // ---- FinishMove: replay post-write + commit ----
 
-void BC_FASTCALL HookedFinishMove(void* services, void* cmd, void* moveData)
+// Applies the recorded end state before FinishMove.
+KHook::Return<void> HookedFinishMove(void* services, void* cmd, void* moveData) noexcept
 {
     g_finishMoveCalls.fetch_add(1, std::memory_order_relaxed);
     int slot = ServicesToSlot(services);
@@ -651,7 +664,15 @@ void BC_FASTCALL HookedFinishMove(void* services, void* cmd, void* moveData)
     // Before original: write post snapshot into MoveData.
     if (replaying) motion_recorder::OnReplayFinishMove(slot, services, moveData);
 
-    g_origFinishMove(services, cmd, moveData);
+    g_finishFrames.push_back({ slot, services, moveData, false, replaying });
+    return { KHook::Action::Ignore };
+}
+
+// Advances the matching replay frame when PhysicsSimulate is unavailable.
+KHook::Return<void> FinishMovePost(void*, void*, void*) noexcept
+{
+    const auto [slot, services, moveData, recording, replaying] = g_finishFrames.back();
+    g_finishFrames.pop_back();
 
     // After original: commit moveType/flags + advance the replay cursor
     if (replaying && !g_physicsActive)
@@ -659,11 +680,13 @@ void BC_FASTCALL HookedFinishMove(void* services, void* cmd, void* moveData)
         motion_recorder::OnReplayCommit(slot, services);
         g_replayCommitCalls.fetch_add(1, std::memory_order_relaxed);
     }
+    return { KHook::Action::Ignore };
 }
 
 // ---- PlayerRunCommand: subtick record + re-inject ----
 
-void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
+// Records or injects the user command before native simulation.
+KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 {
     projectile_birth_align::ProcessPending();
     g_playerRunCommandCalls.fetch_add(1, std::memory_order_relaxed);
@@ -820,13 +843,14 @@ void BC_FASTCALL HookedPlayerRunCommand(void* services, void* cmd)
         if (hasUsercmdMovement && !replaying) ApplyUsercmdMovement(slot, pc, base);
     }
 
-    g_origPlayerRunCommand(services, cmd);
+    return { KHook::Action::Ignore };
 }
 
 // ---- PhysicsSimulate: the per-tick boundary ----
 // Records pre/post + commits
 
-void BC_FASTCALL HookedPhysicsSimulate(void* controller)
+// Captures the per-tick state before any subtick movement.
+KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
 {
     projectile_birth_align::ProcessPending();
     g_physicsSimulateCalls.fetch_add(1, std::memory_order_relaxed);
@@ -843,7 +867,15 @@ void BC_FASTCALL HookedPhysicsSimulate(void* controller)
     // Client commands are normally handled before this tick's player simulation.
     if (replaying) ApplyReplayDrop(slot, services);
 
-    g_origPhysicsSimulate(controller);
+    g_physicsFrames.push_back({ slot, services, nullptr, recording, replaying });
+    return { KHook::Action::Ignore };
+}
+
+// Commits the recording and replay state for the matching simulation call.
+KHook::Return<void> PhysicsSimulatePost(void*) noexcept
+{
+    const auto [slot, services, moveData, recording, replaying] = g_physicsFrames.back();
+    g_physicsFrames.pop_back();
 
     // post: snapshot end-of-tick state + commit one frame
     if (recording) motion_recorder::OnCapturePost(slot, services, nullptr);
@@ -852,6 +884,7 @@ void BC_FASTCALL HookedPhysicsSimulate(void* controller)
         motion_recorder::OnReplayCommit(slot, services);
         g_replayCommitCalls.fetch_add(1, std::memory_order_relaxed);
     }
+    return { KHook::Action::Ignore };
 }
 
 std::atomic<bool> g_vtHooksTried{ false };
@@ -865,17 +898,12 @@ void EnsureVtableHooks(void* services)
 
     if (!GuardedRead(static_cast<const void*>(vt), tg::g_vtIdxFinishMove * static_cast<int>(sizeof(void*)), g_addrFinishMove))
         g_addrFinishMove = nullptr;
-    if (g_addrFinishMove &&
-        g_hookFinishMove.Create(g_addrFinishMove, reinterpret_cast<void*>(&HookedFinishMove), reinterpret_cast<void**>(&g_origFinishMove)))
-        g_hookFinishMove.Enable();
+    if (g_addrFinishMove && !g_hookFinishMove.Install(g_addrFinishMove, &HookedFinishMove, &FinishMovePost)) g_addrFinishMove = nullptr;
 
     // PlayerRunCommand (subtick record/re-inject)
     if (!GuardedRead(static_cast<const void*>(vt), tg::g_vtIdxPlayerRunCommand * static_cast<int>(sizeof(void*)), g_addrPlayerRunCommand))
         g_addrPlayerRunCommand = nullptr;
-    if (g_addrPlayerRunCommand &&
-        g_hookPlayerRunCommand.Create(g_addrPlayerRunCommand, reinterpret_cast<void*>(&HookedPlayerRunCommand),
-                                      reinterpret_cast<void**>(&g_origPlayerRunCommand)) &&
-        g_hookPlayerRunCommand.Enable())
+    if (g_addrPlayerRunCommand && g_hookPlayerRunCommand.Install(g_addrPlayerRunCommand, &HookedPlayerRunCommand))
     {
         g_subtickActive = true;
     }
@@ -883,7 +911,6 @@ void EnsureVtableHooks(void* services)
     {
         g_hookPlayerRunCommand.Remove();
         g_addrPlayerRunCommand = nullptr;
-        g_origPlayerRunCommand = nullptr;
     }
 }
 
@@ -901,13 +928,10 @@ bool Install( // NOLINT(misc-use-internal-linkage)
         g_status = "failed: ProcessMovement sig";
         return false;
     }
-    if (!g_hookProcessMovement.Create(g_addrProcessMovement, reinterpret_cast<void*>(&HookedProcessMovement),
-                                      reinterpret_cast<void**>(&g_origProcessMovement)) ||
-        !g_hookProcessMovement.Enable())
+    if (!g_hookProcessMovement.Install(g_addrProcessMovement, &HookedProcessMovement, &ProcessMovementPost))
     {
         std::snprintf(errorOut, errorOutLen, "hook ProcessMovement failed");
         g_hookProcessMovement.Remove();
-        g_origProcessMovement = nullptr;
         g_status = "failed: hook ProcessMovement";
         return false;
     }
@@ -915,10 +939,7 @@ bool Install( // NOLINT(misc-use-internal-linkage)
     // PhysicsSimulate: the per-tick boundary
     char psErr[256] = { 0 };
     g_addrPhysicsSimulate = sig::ResolveSig(gd, serverModule, "CBasePlayerController::OnSimulateUserCommands", psErr, sizeof(psErr));
-    if (g_addrPhysicsSimulate &&
-        g_hookPhysicsSimulate.Create(g_addrPhysicsSimulate, reinterpret_cast<void*>(&HookedPhysicsSimulate),
-                                     reinterpret_cast<void**>(&g_origPhysicsSimulate)) &&
-        g_hookPhysicsSimulate.Enable())
+    if (g_addrPhysicsSimulate && g_hookPhysicsSimulate.Install(g_addrPhysicsSimulate, &HookedPhysicsSimulate, &PhysicsSimulatePost))
     {
         g_physicsActive = true;
     }
@@ -929,9 +950,8 @@ bool Install( // NOLINT(misc-use-internal-linkage)
             g_hookPhysicsSimulate.Remove();
             g_addrPhysicsSimulate = nullptr;
         }
-        g_origPhysicsSimulate = nullptr;
         Warning("[BotController] PhysicsSimulate hook unavailable (%s); replay falls back to per-subtick boundary (may stutter)\n",
-                psErr[0] ? psErr : "funchook failed");
+                psErr[0] ? psErr : "KHook failed");
     }
 
     // FinishMove is hooked lazily from the live vtable on the first ProcessMovement tick.
@@ -947,10 +967,6 @@ void Remove()
     g_hookFinishMove.Remove();
     g_hookPlayerRunCommand.Remove();
     g_hookPhysicsSimulate.Remove();
-    g_origProcessMovement = nullptr;
-    g_origFinishMove = nullptr;
-    g_origPlayerRunCommand = nullptr;
-    g_origPhysicsSimulate = nullptr;
     g_addrProcessMovement = nullptr;
     g_addrFinishMove = nullptr;
     g_addrPlayerRunCommand = nullptr;
@@ -1006,4 +1022,4 @@ int LastControllerIndex() { return g_lastControllerIndex.load(std::memory_order_
 int LastOriginalControllerIndex() { return g_lastOriginalControllerIndex.load(std::memory_order_relaxed); }
 int LastOwnerSlot() { return g_lastOwnerSlot.load(std::memory_order_relaxed); }
 } // namespace input_injector
-} // namespace bot_controller
+} // namespace cs2bc

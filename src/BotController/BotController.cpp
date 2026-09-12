@@ -7,7 +7,7 @@
 #include "sig_scan.h"
 #include "MotionRecorder.h"
 #include "version_targets.h"
-#include "hook.h"
+#include "hooks.h"
 
 #include <tier0/dbg.h>
 
@@ -18,24 +18,15 @@
 #include <mutex>
 #include <string>
 
-namespace tg = bot_controller::targets;
+namespace tg = cs2bc::targets;
 
-using UpdateT = void(BC_FASTCALL*)(void* bot);
-using UpkeepT = void(BC_FASTCALL*)(void* bot);
-using UpdateLookAnglesT = void(BC_FASTCALL*)(void* bot);
-using SetEyeAnglesT = void(BC_FASTCALL*)(void* pawn, float* angle);
-
-namespace bot_controller {
+namespace cs2bc {
 namespace bot_controller_hooks {
 
 namespace {
-UpdateT g_origUpdate = nullptr;
 void* g_addrUpdate = nullptr;
-UpkeepT g_origUpkeep = nullptr;
 void* g_addrUpkeep = nullptr;
-UpdateLookAnglesT g_origUpdateLookAngles = nullptr;
 void* g_addrUpdateLookAngles = nullptr;
-SetEyeAnglesT g_origSetEyeAngles = nullptr;
 void* g_addrSetEyeAngles = nullptr;
 #ifdef _WIN32
 void** g_entityIdentityChunks = nullptr;
@@ -47,10 +38,10 @@ std::string g_status = "not_attempted"; // NOLINT(bugprone-throwing-static-initi
 void* g_slotToBot[64] = { nullptr };
 std::mutex g_slotToBotMu;
 
-Hook g_hookUpdate;
-Hook g_hookUpkeep;
-Hook g_hookUpdateLookAngles;
-Hook g_hookSetEyeAngles;
+hooks::NativeHook<void, void*> g_hookUpdate;
+hooks::NativeHook<void, void*> g_hookUpkeep;
+hooks::NativeHook<void, void*> g_hookUpdateLookAngles;
+hooks::NativeHook<void, void*, float*> g_hookSetEyeAngles;
 
 // Normalizes an angle to the engine's expected [-180, 180) range.
 float NormalizeDeg(float angle)
@@ -114,7 +105,7 @@ void* ReplayControllerForPawn(void* pawn)
 // Calls SetEyeAngles while temporarily bypassing the new fake-client early-out.
 bool ApplyReplayEyeAnglesInternal(void* pawn, float pitch, float yaw)
 {
-    if (!pawn || !g_origSetEyeAngles) return false;
+    if (!pawn || !g_hookSetEyeAngles.Active()) return false;
 
     float angle[3] = { pitch, NormalizeDeg(yaw), 0.0F };
 #ifdef _WIN32
@@ -127,7 +118,7 @@ bool ApplyReplayEyeAnglesInternal(void* pawn, float pitch, float yaw)
         restoreFakeClient = WriteField(controller, tg::g_entFlags, publishedFlags);
     }
 #endif
-    g_origSetEyeAngles(pawn, angle);
+    g_hookSetEyeAngles.CallOriginal(pawn, angle);
 #ifdef _WIN32
     if (restoreFakeClient) WriteField(controller, tg::g_entFlags, controllerFlags);
 #endif
@@ -135,7 +126,7 @@ bool ApplyReplayEyeAnglesInternal(void* pawn, float pitch, float yaw)
 }
 
 // Skip the Bot tick under All lock OR while replaying
-void BC_FASTCALL HookedUpdate(void* bot)
+KHook::Return<void> HookedUpdate(void* bot) noexcept
 {
     int slot = CCSBotToSlot(bot);
     if (slot >= 0 && slot < 64)
@@ -147,41 +138,39 @@ void BC_FASTCALL HookedUpdate(void* bot)
     {
         const uint8_t ticked = 1;
         WriteField(bot, tg::g_botAiTickedFlag, ticked);
-        return;
+        return { KHook::Action::Supersede };
     }
-    g_origUpdate(bot);
+    return { KHook::Action::Ignore };
 }
 
 // Skip the per-frame view tick under All or Aim lock.
 // EXCEPTION: while a slot is replaying, drive ONLY the view
-static void BC_FASTCALL HookedUpdateLookAngles(void* bot); // fwd decl
-
-void BC_FASTCALL HookedUpkeep(void* bot)
+KHook::Return<void> HookedUpkeep(void* bot) noexcept
 {
     int slot = CCSBotContextToSlot(bot);
-    if (slot >= 0 && motion_recorder::IsReplaying(slot)) return;
+    if (slot >= 0 && motion_recorder::IsReplaying(slot)) return { KHook::Action::Supersede };
     if (slot >= 0 && (bot_controller_state::GetAll(slot) || bot_controller_state::GetAim(slot)))
     {
-        return;
+        return { KHook::Action::Supersede };
     }
-    g_origUpkeep(bot);
+    return { KHook::Action::Ignore };
 }
 
 // view replay
-void BC_FASTCALL HookedUpdateLookAngles(void* bot)
+KHook::Return<void> HookedUpdateLookAngles(void* bot) noexcept
 {
     int slot = CCSBotContextToSlot(bot);
     if (slot >= 0 && (motion_recorder::IsReplaying(slot) || bot_controller_state::GetAll(slot) || bot_controller_state::GetAim(slot)))
-        return;
-    g_origUpdateLookAngles(bot);
+        return { KHook::Action::Supersede };
+    return { KHook::Action::Ignore };
 }
 
 // Engine eye-angle
-void BC_FASTCALL HookedSetEyeAngles(void* pawn, float* angle)
+KHook::Return<void> HookedSetEyeAngles(void* pawn, float* angle) noexcept
 {
     int slot = pawn ? ControllerSlotForPawn(pawn) : -1;
-    if (slot >= 0 && motion_recorder::IsReplaying(slot)) return;
-    g_origSetEyeAngles(pawn, angle);
+    if (slot >= 0 && motion_recorder::IsReplaying(slot)) return { KHook::Action::Supersede };
+    return { KHook::Action::Ignore };
 }
 
 // Resolve a sig from gamedata against the loaded server.dll.
@@ -227,25 +216,20 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
 #endif
 
     // required: Update
-    if (!g_hookUpdate.Create(g_addrUpdate, reinterpret_cast<void*>(&HookedUpdate), reinterpret_cast<void**>(&g_origUpdate)) ||
-        !g_hookUpdate.Enable())
+    if (!g_hookUpdate.Install(g_addrUpdate, &HookedUpdate))
     {
         std::snprintf(errorOut, errorOutLen, "hook CCSBot::Update failed");
         g_hookUpdate.Remove();
-        g_origUpdate = nullptr;
         g_status = "failed: hook Update";
         return false;
     }
 
     // required: Upkeep
-    if (!g_hookUpkeep.Create(g_addrUpkeep, reinterpret_cast<void*>(&HookedUpkeep), reinterpret_cast<void**>(&g_origUpkeep)) ||
-        !g_hookUpkeep.Enable())
+    if (!g_hookUpkeep.Install(g_addrUpkeep, &HookedUpkeep))
     {
         std::snprintf(errorOut, errorOutLen, "hook CCSBot::Upkeep failed");
         g_hookUpkeep.Remove();
-        g_origUpkeep = nullptr;
         g_hookUpdate.Remove();
-        g_origUpdate = nullptr;
         g_status = "failed: hook Upkeep";
         return false;
     }
@@ -253,13 +237,10 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
     // optional: UpdateLookAngles
     if (g_addrUpdateLookAngles)
     {
-        if (!g_hookUpdateLookAngles.Create(g_addrUpdateLookAngles, reinterpret_cast<void*>(&HookedUpdateLookAngles),
-                                           reinterpret_cast<void**>(&g_origUpdateLookAngles)) ||
-            !g_hookUpdateLookAngles.Enable())
+        if (!g_hookUpdateLookAngles.Install(g_addrUpdateLookAngles, &HookedUpdateLookAngles))
         {
             Warning("[BotController] hook UpdateLookAngles failed; replay view-drive disabled\n");
             g_hookUpdateLookAngles.Remove();
-            g_origUpdateLookAngles = nullptr;
             g_addrUpdateLookAngles = nullptr;
         }
     }
@@ -267,13 +248,10 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
     // optional: SetEyeAngles
     if (g_addrSetEyeAngles)
     {
-        if (!g_hookSetEyeAngles.Create(g_addrSetEyeAngles, reinterpret_cast<void*>(&HookedSetEyeAngles),
-                                       reinterpret_cast<void**>(&g_origSetEyeAngles)) ||
-            !g_hookSetEyeAngles.Enable())
+        if (!g_hookSetEyeAngles.Install(g_addrSetEyeAngles, &HookedSetEyeAngles))
         {
             Warning("[BotController] hook SetEyeAngles failed; replay 1:1 view disabled\n");
             g_hookSetEyeAngles.Remove();
-            g_origSetEyeAngles = nullptr;
             g_addrSetEyeAngles = nullptr;
         }
     }
@@ -287,16 +265,12 @@ void Remove()
 {
     if (!g_installed) return;
     g_hookSetEyeAngles.Remove();
-    g_origSetEyeAngles = nullptr;
 #ifdef _WIN32
     g_entityIdentityChunks = nullptr;
 #endif
     g_hookUpdateLookAngles.Remove();
-    g_origUpdateLookAngles = nullptr;
     g_hookUpkeep.Remove();
-    g_origUpkeep = nullptr;
     g_hookUpdate.Remove();
-    g_origUpdate = nullptr;
     g_installed = false;
     g_status = "not_attempted";
     {
@@ -322,4 +296,4 @@ void* BotForSlot(int slot)
     return g_slotToBot[slot];
 }
 } // namespace bot_controller_hooks
-} // namespace bot_controller
+} // namespace cs2bc

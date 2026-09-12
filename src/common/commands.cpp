@@ -24,7 +24,7 @@
 #include <vector> // NOLINT(misc-include-cleaner)
 #include <string> // NOLINT(misc-include-cleaner)
 
-namespace bot_controller {
+namespace cs2bc {
 namespace commands {
 IVEngineServer2* g_engine = nullptr;
 
@@ -113,24 +113,24 @@ const char* KindName(LockKind k)
 }
 } // namespace
 } // namespace commands
-} // namespace bot_controller
+} // namespace cs2bc
 
 namespace {
 
-namespace commands = bot_controller::commands;
-namespace dispatch = bot_controller::dispatch;
-namespace bot_controller_state = bot_controller::bot_controller_state;
-namespace bot_profile = bot_controller::bot_profile;
-namespace buy_controller_hooks = bot_controller::buy_controller_hooks;
-namespace buy_controller_state = bot_controller::buy_controller_state;
-namespace bot_controller_hooks = bot_controller::bot_controller_hooks;
-namespace input_injector = bot_controller::input_injector;
-namespace motion_recorder = bot_controller::motion_recorder;
-namespace weapon_locker_hooks = bot_controller::weapon_locker_hooks;
-namespace weapon_locker_state = bot_controller::weapon_locker_state;
-using bot_controller::BotProfileData;
-using bot_controller::LockKind;
-using bot_controller::LockTarget;
+namespace commands = cs2bc::commands;
+namespace dispatch = cs2bc::dispatch;
+namespace bot_controller_state = cs2bc::bot_controller_state;
+namespace bot_profile = cs2bc::bot_profile;
+namespace buy_controller_hooks = cs2bc::buy_controller_hooks;
+namespace buy_controller_state = cs2bc::buy_controller_state;
+namespace bot_controller_hooks = cs2bc::bot_controller_hooks;
+namespace input_injector = cs2bc::input_injector;
+namespace motion_recorder = cs2bc::motion_recorder;
+namespace weapon_locker_hooks = cs2bc::weapon_locker_hooks;
+namespace weapon_locker_state = cs2bc::weapon_locker_state;
+using cs2bc::BotProfileData;
+using cs2bc::LockKind;
+using cs2bc::LockTarget;
 
 CON_COMMAND_F(bc_lock, // NOLINT(bugprone-throwing-static-initialization)
               "bc_lock <all|aim|weapon> <slot> [slot1..slot5]  "

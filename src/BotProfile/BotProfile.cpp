@@ -8,9 +8,9 @@
 #include <algorithm>
 #include <cstring>
 
-namespace tg = bot_controller::targets;
+namespace tg = cs2bc::targets;
 
-namespace bot_controller {
+namespace cs2bc {
 namespace bot_profile {
 // Read profile members off a live bot for this slot
 bool ReadProfile(int slot, BotProfileData& out)
@@ -42,4 +42,4 @@ bool ReadProfile(int slot, BotProfileData& out)
     return true;
 }
 } // namespace bot_profile
-} // namespace bot_controller
+} // namespace cs2bc

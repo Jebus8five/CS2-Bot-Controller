@@ -151,34 +151,14 @@ add_custom_command(
     VERBATIM
 )
 
-include(FetchContent)
-
-set(FUNCHOOK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(FUNCHOOK_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-
-if(DEFINED ENV{FUNCHOOK_SOURCE} AND EXISTS "$ENV{FUNCHOOK_SOURCE}/CMakeLists.txt")
-    set(FETCHCONTENT_SOURCE_DIR_FUNCHOOK "$ENV{FUNCHOOK_SOURCE}" CACHE PATH "")
+if(NOT EXISTS "${MMS}/third_party/khook/include/khook.hpp")
+    message(FATAL_ERROR "Metamod with KHook is required; initialize its recursive submodules.")
 endif()
-
-FetchContent_Declare(
-    funchook
-    GIT_REPOSITORY https://github.com/kubo/funchook.git
-    GIT_TAG v1.1.3
-    GIT_SHALLOW TRUE
-    UPDATE_DISCONNECTED TRUE
-)
-
-FetchContent_MakeAvailable(funchook)
 
 set(SDK_SOURCES
     ${HL2SDK}/public/tier0/memoverride.cpp
     ${HL2SDK}/tier1/keyvalues3.cpp
     ${HL2SDK}/tier1/convar.cpp
-    ${MMS}/core/sourcehook/sourcehook.cpp
-    ${MMS}/core/sourcehook/sourcehook_impl_chookidman.cpp
-    ${MMS}/core/sourcehook/sourcehook_impl_chookmaninfo.cpp
-    ${MMS}/core/sourcehook/sourcehook_impl_cvfnptr.cpp
-    ${MMS}/core/sourcehook/sourcehook_impl_cproto.cpp
 )
 
 add_library(
@@ -227,7 +207,7 @@ target_include_directories(
     ${GENERATED_DIR}
     ${HL2SDK}/thirdparty/protobuf-3.21.8/src
     ${MMS}/core
-    ${MMS}/core/sourcehook
+    ${MMS}/third_party/khook/include
     ${MMS}/core/sourcemm
     ${HL2SDK}/public
     ${HL2SDK}/public/engine
@@ -239,8 +219,6 @@ target_include_directories(
     ${HL2SDK}/game/shared
     ${HL2SDK}/common
 )
-
-target_link_libraries(BotController PRIVATE funchook-static)
 
 target_compile_definitions(
     BotController

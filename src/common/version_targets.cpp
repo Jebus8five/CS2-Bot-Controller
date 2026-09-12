@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 
-namespace bot_controller::targets {
+namespace cs2bc::targets {
 // Each offset: gamedata[name].offsets[platform], else keep code default
 void LoadFromGamedata(const nlohmann::json& gd)
 {
@@ -123,4 +123,4 @@ bool LoadFromSchema(char* errorOut, size_t errorOutLen)
     if (initialVelocity >= 0) g_projectileInitialVelocity = initialVelocity;
     return true;
 }
-} // namespace bot_controller::targets
+} // namespace cs2bc::targets
