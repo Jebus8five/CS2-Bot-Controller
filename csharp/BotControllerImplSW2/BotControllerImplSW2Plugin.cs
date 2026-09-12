@@ -19,7 +19,7 @@ namespace BotControllerImplSW2;
 
 [PluginMetadata(
     Id = "botcontroller.sw2",
-    Version = "0.7.0",
+    Version = PluginBuildInfo.Version,
     Name = "BotController",
     Author = "XBribo & nicedayzhu",
     Description = "Record & Replay and Control CS2 bots."
@@ -205,6 +205,7 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
     // Loads the plugin and hooks replay ticking when the native ABI is ready.
     public override void Load(bool _)
     {
+        Logger.LogInformation("{Version}, built {BuildTime}", PluginBuildInfo.DisplayVersion, PluginBuildInfo.BuildTime);
         if (!EnsureNativeApiAvailability()) return;
 
         Directory.CreateDirectory(RecordingsDir);

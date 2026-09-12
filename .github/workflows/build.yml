@@ -36,8 +36,7 @@ env:
 
 jobs:
   # ------------------------------------------------------------------- Guard
-  # Extracts the three version strings. On release runs it additionally
-  # enforces: target=all, all versions identical, tag not already published.
+  # Reads the shared version and checks release prerequisites.
   guard:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -52,42 +51,27 @@ jobs:
       - name: Extract versions
         id: ver
         run: |
-          mm=$(sed -nE 's/.*GetVersion\(\) override \{ return "([^"]+)".*/\1/p' src/plugin.cpp | head -1)
-          css=$(sed -nE 's/.*ModuleVersion => "([^"]+)".*/\1/p' csharp/BotControllerImpl/BotControllerImplPlugin.cs | head -1)
-          sw2=$(sed -nE 's/.*Version = "([^"]+)".*/\1/p' csharp/BotControllerImplSW2/BotControllerImplSW2Plugin.cs | head -1)
-          echo "MM=$mm CSS=$css SW2=$sw2"
-          for v in "$mm" "$css" "$sw2"; do
-            test -n "$v" || { echo "::error::failed to extract a version string"; exit 1; }
-          done
+          mm=$(sed -nE 's/^project\([^ ]+ VERSION ([0-9.]+) LANGUAGES .*/\1/p' CMakeLists.txt | head -1)
+          test -n "$mm" || { echo "::error::failed to extract the CMake version"; exit 1; }
+          echo "Package version=$mm"
           {
             echo "mm=$mm"
-            echo "css=$css"
-            echo "sw2=$sw2"
+            echo "css=$mm"
+            echo "sw2=$mm"
+            echo "unified=$mm"
           } >> "$GITHUB_OUTPUT"
-          if [ "$mm" = "$css" ] && [ "$css" = "$sw2" ]; then
-            echo "unified=$mm" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::version mismatch: MM=$mm CSS=$css SW2=$sw2"
-            echo "unified=" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Release preconditions
         if: inputs.release
         env:
           MM: ${{ steps.ver.outputs.mm }}
-          CSS: ${{ steps.ver.outputs.css }}
-          SW2: ${{ steps.ver.outputs.sw2 }}
         run: |
           if [ "${{ inputs.target }}" != "all" ]; then
             echo "::error::release requires target=all (got '${{ inputs.target }}')"
             exit 1
           fi
-          if [ "$MM" != "$CSS" ] || [ "$CSS" != "$SW2" ]; then
-            echo "::error::version mismatch, refusing to release: MM=$MM CSS=$CSS SW2=$SW2"
-            exit 1
-          fi
           if git ls-remote --tags origin "refs/tags/v$MM" | grep -q .; then
-            echo "::error::tag v$MM already exists — bump the version strings first"
+            echo "::error::tag v$MM already exists — bump the CMake version first"
             exit 1
           fi
           echo "releasing v$MM"
@@ -240,7 +224,7 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Build
-        run: dotnet build csharp/BotControllerImpl -c Release
+        run: dotnet build csharp/BotControllerImpl -c Release -p:PluginVersion=${{ needs.guard.outputs.version }}
 
       - name: Stage package
         run: |
@@ -270,7 +254,7 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Build
-        run: dotnet build csharp/BotControllerImplSW2 -c Release
+        run: dotnet build csharp/BotControllerImplSW2 -c Release -p:PluginVersion=${{ needs.guard.outputs.version }}
 
       - name: Stage package
         run: |

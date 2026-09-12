@@ -19,7 +19,7 @@ namespace BotControllerImpl;
 public partial class BotControllerPlugin : BasePlugin
 {
     public override string ModuleName => "BotControllerImpl";
-    public override string ModuleVersion => "0.7.0";
+    public override string ModuleVersion => PluginBuildInfo.DisplayVersion;
     public override string ModuleAuthor => "XBribo";
     public override string ModuleDescription =>
         "Record & Replay and Control CS2 bots.";
@@ -33,6 +33,7 @@ public partial class BotControllerPlugin : BasePlugin
     // Loads the managed plugin and publishes its shared API
     public override void Load(bool hotReload)
     {
+        Server.PrintToConsole($"[BotController] {PluginBuildInfo.DisplayVersion}, built {PluginBuildInfo.BuildTime}");
         if (!BotController.IsCompatible())
         {
             Server.PrintToConsole("[BotController] BotController ABI mismatch; disabled.");

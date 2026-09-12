@@ -1,6 +1,6 @@
 // BotController native Metamod:Source plugin entry point.
 
-#include <ISmmPlugin.h>
+#include "plugin.h"
 
 #include <cstdio>
 #include <string>
@@ -32,29 +32,14 @@
 #include "ProjectileBirthAlign.h"
 #include "version_targets.h"
 
-class BotControllerPlugin : public ISmmPlugin
-{
-  public:
-    bool Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late) override;
-    bool Unload(char* error, size_t maxlen) override;
+#define VERSION_STRING  "v" SEMVER " @ " GITHUB_SHA
+#define BUILD_TIMESTAMP __DATE__ " " __TIME__
 
-    bool Pause(char* /*error*/, size_t /*maxlen*/) override { return true; }
-    bool Unpause(char* /*error*/, size_t /*maxlen*/) override { return true; }
-    void AllPluginsLoaded() override {}
+PLUGIN_EXPOSE(cs2bc::BotControllerPlugin, cs2bc::g_plugin);
 
-    const char* GetAuthor() override { return "XBribo(๑•.•๑)"; }
-    const char* GetName() override { return "BotController"; }
-    const char* GetDescription() override { return "Record & Replay and Control CS2 bots."; }
-    const char* GetURL() override { return ""; }
-    const char* GetLicense() override { return "AGPL-3.0"; }
-    const char* GetVersion() override { return "0.7.0"; }
-    const char* GetDate() override { return __DATE__; }
-    const char* GetLogTag() override { return "BC"; }
-};
+namespace cs2bc {
 
-BotControllerPlugin g_botControllerPlugin; // NOLINT(misc-use-internal-linkage)
-PLUGIN_EXPOSE(BotControllerPlugin, // NOLINT(misc-use-internal-linkage,misc-use-anonymous-namespace,bugprone-throwing-static-initialization)
-              g_botControllerPlugin);
+BotControllerPlugin g_plugin;
 
 namespace {
 
@@ -193,6 +178,32 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
     return true;
 }
 
+// Accepts a plugin pause request.
+bool BotControllerPlugin::Pause(char*, size_t) { return true; }
+
+// Accepts a plugin resume request.
+bool BotControllerPlugin::Unpause(char*, size_t) { return true; }
+
+// No additional cross-plugin initialization is required.
+void BotControllerPlugin::AllPluginsLoaded() {}
+
+// Returns plugin author metadata.
+const char* BotControllerPlugin::GetAuthor() { return "XBribo(๑•.•๑)"; }
+// Returns the plugin name.
+const char* BotControllerPlugin::GetName() { return "BotController"; }
+// Returns the plugin description.
+const char* BotControllerPlugin::GetDescription() { return "Record & Replay and Control CS2 bots."; }
+// Returns the plugin project URL.
+const char* BotControllerPlugin::GetURL() { return ""; }
+// Returns the plugin license.
+const char* BotControllerPlugin::GetLicense() { return "AGPL-3.0"; }
+// Returns the version supplied by the build.
+const char* BotControllerPlugin::GetVersion() { return VERSION_STRING; }
+// Returns the compilation date and time.
+const char* BotControllerPlugin::GetDate() { return BUILD_TIMESTAMP; }
+// Returns the plugin log tag.
+const char* BotControllerPlugin::GetLogTag() { return "BC"; }
+
 bool BotControllerPlugin::Unload(char* /*error*/, size_t /*maxlen*/)
 {
     // Drain movement callbacks before releasing their recording and replay state.
@@ -215,3 +226,5 @@ bool BotControllerPlugin::Unload(char* /*error*/, size_t /*maxlen*/)
     g_pCVar = nullptr;
     return true;
 }
+
+} // namespace cs2bc
