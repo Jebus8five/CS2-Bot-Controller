@@ -194,7 +194,7 @@ const char* BotControllerPlugin::GetName() { return "BotController"; }
 // Returns the plugin description.
 const char* BotControllerPlugin::GetDescription() { return "Record & Replay and Control CS2 bots."; }
 // Returns the plugin project URL.
-const char* BotControllerPlugin::GetURL() { return ""; }
+const char* BotControllerPlugin::GetURL() { return "https://github.com/XBribo/CS2-Bot-Controller"; }
 // Returns the plugin license.
 const char* BotControllerPlugin::GetLicense() { return "AGPL-3.0"; }
 // Returns the version supplied by the build.
