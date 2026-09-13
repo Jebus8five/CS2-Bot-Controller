@@ -952,7 +952,7 @@ bool Install( // NOLINT(misc-use-internal-linkage)
             g_hookPhysicsSimulate.Remove();
             g_addrPhysicsSimulate = nullptr;
         }
-        BC_LOG_WARN("[BotController] PhysicsSimulate hook unavailable (%s); replay falls back to per-subtick boundary (may stutter)\n",
+        BC_LOG_WARN("PhysicsSimulate hook unavailable (%s); replay falls back to per-subtick boundary (may stutter)\n",
                     psErr[0] ? psErr : "KHook failed");
     }
 

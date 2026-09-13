@@ -199,7 +199,7 @@ bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, 
     g_addrUpdateLookAngles = gameconfig::ResolveSig(gd, serverModule, "CCSBot::UpdateLookAngles", ulaErr, sizeof(ulaErr));
     if (!g_addrUpdateLookAngles)
     {
-        BC_LOG_WARN("[BotController] CCSBot::UpdateLookAngles sig not resolved (%s); replay view-drive disabled\n", ulaErr);
+        BC_LOG_WARN("CCSBot::UpdateLookAngles sig not resolved (%s); replay view-drive disabled\n", ulaErr);
     }
 
     // SetEyeAngles is optional; without it replay view falls back to
@@ -208,7 +208,7 @@ bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, 
     g_addrSetEyeAngles = gameconfig::ResolveSig(gd, serverModule, "CCSPlayerPawn::SetEyeAngles", seaErr, sizeof(seaErr));
     if (!g_addrSetEyeAngles)
     {
-        BC_LOG_WARN("[BotController] CCSPlayerPawn::SetEyeAngles sig not resolved (%s); replay 1:1 view disabled\n", seaErr);
+        BC_LOG_WARN("CCSPlayerPawn::SetEyeAngles sig not resolved (%s); replay 1:1 view disabled\n", seaErr);
     }
 #ifdef _WIN32
     else
@@ -241,7 +241,7 @@ bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, 
     {
         if (!g_hookUpdateLookAngles.Install(g_addrUpdateLookAngles, &HookedUpdateLookAngles))
         {
-            BC_LOG_WARN("[BotController] hook UpdateLookAngles failed; replay view-drive disabled\n");
+            BC_LOG_WARN("hook UpdateLookAngles failed; replay view-drive disabled\n");
             g_hookUpdateLookAngles.Remove();
             g_addrUpdateLookAngles = nullptr;
         }
@@ -252,7 +252,7 @@ bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, 
     {
         if (!g_hookSetEyeAngles.Install(g_addrSetEyeAngles, &HookedSetEyeAngles))
         {
-            BC_LOG_WARN("[BotController] hook SetEyeAngles failed; replay 1:1 view disabled\n");
+            BC_LOG_WARN("hook SetEyeAngles failed; replay 1:1 view disabled\n");
             g_hookSetEyeAngles.Remove();
             g_addrSetEyeAngles = nullptr;
         }

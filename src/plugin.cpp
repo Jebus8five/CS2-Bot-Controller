@@ -66,7 +66,7 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
         if (cs2bc::projectile_birth_align::ConfigureOffsets(cs2bc::offsets::g_projectileInitialPosition,
                                                             cs2bc::offsets::g_projectileInitialVelocity) != 0)
         {
-            BC_LOG_WARN("[BotController] projectile birth alignment offsets unavailable\n");
+            BC_LOG_WARN("projectile birth alignment offsets unavailable\n");
         }
         ConVar_Register(FCVAR_RELEASE | FCVAR_GAMEDLL);
         m_convarsRegistered = true;
@@ -83,14 +83,14 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
         char buyErr[256] = { 0 };
         if (!cs2bc::buy_controller_hooks::Install(gd, serverModule, buyErr, sizeof(buyErr)))
         {
-            BC_LOG_WARN("[BotController] BuyController::Install failed (%s); bot buy control disabled\n", buyErr);
+            BC_LOG_WARN("BuyController::Install failed (%s); bot buy control disabled\n", buyErr);
         }
 
         // movement hooks for record/replay
         char injErr[256] = { 0 };
         if (!cs2bc::input_injector::Install(gd, serverModule, injErr, sizeof(injErr)))
         {
-            BC_LOG_WARN("[BotController] InputInjector::Install failed (%s); record/replay movement will be a no-op\n", injErr);
+            BC_LOG_WARN("InputInjector::Install failed (%s); record/replay movement will be a no-op\n", injErr);
         }
 
         return true;
@@ -101,7 +101,8 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
         Unload(nullptr, 0);
         return false;
     }
-    BC_LOG_INFO("Loaded %s, built %s", GetVersion(), GetDate());
+    BC_LOG_INFO("Loaded %s", GetVersion());
+    BC_LOG_DEBUG("Built %s", GetDate());
     return true;
 }
 
@@ -150,7 +151,7 @@ bool BotControllerPlugin::Unload(char* /*error*/, size_t /*maxlen*/)
     if (m_convarsRegistered) ConVar_Unregister();
     m_convarsRegistered = false;
     g_pCVar = nullptr;
-    BC_LOG_INFO("Plugin unloaded");
+    BC_LOG_INFO("Unloaded");
     log::Close();
     return true;
 }
