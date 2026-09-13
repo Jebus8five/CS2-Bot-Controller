@@ -1,3 +1,4 @@
+#include "core/gameconfig.h"
 #include "core/log.h"
 // CS2 movement hooks
 // ProcessMovement (record + apply pre)
@@ -10,11 +11,11 @@
 
 #include "InputInjector.h"
 #include "ccsbot_slot.h"
-#include "sig_scan.h"
+#include "core/memory_module.h"
 #include "MotionRecorder.h"
 #include "ProjectileBirthAlign.h"
 #include "usercmd.pb.h"
-#include "version_targets.h"
+#include "offsets.h"
 #include "hooks.h"
 
 #include <algorithm> // NOLINT(misc-include-cleaner)
@@ -30,7 +31,7 @@
 
 #include <tier0/dbg.h>
 
-namespace tg = cs2bc::targets;
+namespace tg = cs2bc::offsets;
 
 namespace cs2bc {
 namespace input_injector {
@@ -919,11 +920,11 @@ void EnsureVtableHooks(void* services)
 
 bool Install( // NOLINT(misc-use-internal-linkage)
     const nlohmann::json& gd,
-    const sig::ModuleInfo& serverModule,
+    const modules::ModuleInfo& serverModule,
     char* errorOut,
     size_t errorOutLen) // NOLINT(misc-use-internal-linkage)
 {
-    g_addrProcessMovement = sig::ResolveSig(gd, serverModule, "CCSPlayer_MovementServices::ProcessMovement", errorOut, errorOutLen);
+    g_addrProcessMovement = gameconfig::ResolveSig(gd, serverModule, "CCSPlayer_MovementServices::ProcessMovement", errorOut, errorOutLen);
     if (!g_addrProcessMovement)
     {
         g_status = "failed: ProcessMovement sig";
@@ -939,7 +940,7 @@ bool Install( // NOLINT(misc-use-internal-linkage)
 
     // PhysicsSimulate: the per-tick boundary
     char psErr[256] = { 0 };
-    g_addrPhysicsSimulate = sig::ResolveSig(gd, serverModule, "CBasePlayerController::OnSimulateUserCommands", psErr, sizeof(psErr));
+    g_addrPhysicsSimulate = gameconfig::ResolveSig(gd, serverModule, "CBasePlayerController::OnSimulateUserCommands", psErr, sizeof(psErr));
     if (g_addrPhysicsSimulate && g_hookPhysicsSimulate.Install(g_addrPhysicsSimulate, &HookedPhysicsSimulate, &PhysicsSimulatePost))
     {
         g_physicsActive = true;

@@ -6,7 +6,7 @@
 #include <string>
 
 #include <nlohmann/json.hpp>
-#include "sig_scan.h"
+#include "core/memory_module.h"
 
 namespace cs2bc {
 namespace input_injector {
@@ -14,7 +14,7 @@ namespace input_injector {
 static constexpr int kMaxSlots = 64;
 
 // Resolve sigs and install the movement hooks.
-bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen);
+bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen);
 
 // Disable + remove the hooks.
 void Remove();

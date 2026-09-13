@@ -22,10 +22,10 @@
 #include "MotionRecorder.h"
 #include "WeaponLockerState.h"
 #include "BotControllerState.h"
-#include "sig_scan.h"
+#include "core/memory_module.h"
 #include "core/cs2_sdk/schema.h"
 #include "ProjectileBirthAlign.h"
-#include "version_targets.h"
+#include "offsets.h"
 
 #define VERSION_STRING  "v" SEMVER " @ " GITHUB_SHA
 #define BUILD_TIMESTAMP __DATE__ " " __TIME__
@@ -57,14 +57,14 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
             std::snprintf(error, maxlen, "Schema initialization failed: %s", schemaError);
             return false;
         }
-        if (!cs2bc::targets::LoadFromSchema(schemaError, sizeof(schemaError)))
+        if (!cs2bc::offsets::LoadFromSchema(schemaError, sizeof(schemaError)))
         {
             cs2bc::schema::Reset();
             std::snprintf(error, maxlen, "Schema target resolution failed: %s", schemaError);
             return false;
         }
-        if (cs2bc::projectile_birth_align::ConfigureOffsets(cs2bc::targets::g_projectileInitialPosition,
-                                                            cs2bc::targets::g_projectileInitialVelocity) != 0)
+        if (cs2bc::projectile_birth_align::ConfigureOffsets(cs2bc::offsets::g_projectileInitialPosition,
+                                                            cs2bc::offsets::g_projectileInitialVelocity) != 0)
         {
             BC_LOG_WARN("[BotController] projectile birth alignment offsets unavailable\n");
         }
@@ -72,7 +72,7 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
         m_convarsRegistered = true;
 
         nlohmann::json gd;
-        sig::ModuleInfo serverModule;
+        modules::ModuleInfo serverModule;
         if (!gamedata::Load(interfaces::ServerInterface(), gd, serverModule, error, maxlen)) return false;
 
         if (!cs2bc::weapon_locker_hooks::Install(gd, serverModule, error, maxlen)) return false;

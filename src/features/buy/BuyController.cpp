@@ -1,3 +1,4 @@
+#include "core/gameconfig.h"
 // Detour for BuyState::OnUpdate
 
 #include "BuyController.h"
@@ -5,8 +6,8 @@
 #include "MotionRecorder.h"
 #include "ccsbot_slot.h"
 #include "nlohmann/json.hpp"
-#include "sig_scan.h"
-#include "version_targets.h"
+#include "core/memory_module.h"
+#include "offsets.h"
 #include "dispatch.h"
 #include "hooks.h"
 
@@ -18,7 +19,7 @@
 #include <cstdio>
 #include <string>
 
-namespace tg = cs2bc::targets;
+namespace tg = cs2bc::offsets;
 
 namespace cs2bc {
 namespace buy_controller_hooks {
@@ -82,9 +83,9 @@ KHook::Return<void> HookedOnUpdate(void* self, void* me) noexcept
 
 } // namespace
 
-bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
+bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
 {
-    g_addrOnUpdate = sig::ResolveSig(gd, serverModule, "BuyState::OnUpdate", errorOut, errorOutLen);
+    g_addrOnUpdate = gameconfig::ResolveSig(gd, serverModule, "BuyState::OnUpdate", errorOut, errorOutLen);
     if (!g_addrOnUpdate)
     {
         g_status = "failed: OnUpdate sig";

@@ -1,7 +1,7 @@
 // CCSBot* -> player slot via pawn (+0x18) -> controller handle.
 
 #include "ccsbot_slot.h"
-#include "version_targets.h"
+#include "offsets.h"
 
 #include <cstdint>
 #include <cstring>
@@ -20,7 +20,7 @@
 #include <unistd.h>
 #endif
 
-namespace tg = cs2bc::targets;
+namespace tg = cs2bc::offsets;
 
 namespace cs2bc {
 

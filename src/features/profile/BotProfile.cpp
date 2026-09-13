@@ -3,12 +3,12 @@
 #include "BotProfile.h"
 #include "BotController.h"
 #include "ccsbot_slot.h"
-#include "version_targets.h"
+#include "offsets.h"
 
 #include <algorithm>
 #include <cstring>
 
-namespace tg = cs2bc::targets;
+namespace tg = cs2bc::offsets;
 
 namespace cs2bc {
 namespace bot_profile {

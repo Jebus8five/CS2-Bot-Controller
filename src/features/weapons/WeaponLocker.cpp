@@ -1,13 +1,14 @@
+#include "core/gameconfig.h"
 // Detours for CCSBot::EquipBestWeapon, EquipPistol, and
 // CCSPlayer_WeaponServices::SelectItem
 
 #include "WeaponLocker.h"
 #include "nlohmann/json.hpp"
-#include "sig_scan.h"
+#include "core/memory_module.h"
 #include "WeaponLockerState.h"
 #include "ccsbot_slot.h"
 #include "MotionRecorder.h"
-#include "version_targets.h"
+#include "offsets.h"
 #include "hooks.h"
 
 #include <cstdint>
@@ -16,7 +17,7 @@
 #include <mutex>
 #include <unordered_map>
 
-namespace tg = cs2bc::targets;
+namespace tg = cs2bc::offsets;
 
 using GetSlotT = void*(BC_FASTCALL*)(void* ws, int slot, unsigned int mask);
 
@@ -152,30 +153,30 @@ KHook::Return<char> HookedSelectItem(void* ws, void* weapon, int flag) noexcept
 
 } // namespace
 
-bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
+bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
 {
-    g_addrEquipBestWeapon = sig::ResolveSig(gd, serverModule, "CCSBot::EquipBestWeapon", errorOut, errorOutLen);
+    g_addrEquipBestWeapon = gameconfig::ResolveSig(gd, serverModule, "CCSBot::EquipBestWeapon", errorOut, errorOutLen);
     if (!g_addrEquipBestWeapon)
     {
         g_status = "failed: EquipBestWeapon sig";
         return false;
     }
 
-    g_addrEquipPistol = sig::ResolveSig(gd, serverModule, "CCSBot::EquipPistol", errorOut, errorOutLen);
+    g_addrEquipPistol = gameconfig::ResolveSig(gd, serverModule, "CCSBot::EquipPistol", errorOut, errorOutLen);
     if (!g_addrEquipPistol)
     {
         g_status = "failed: EquipPistol sig";
         return false;
     }
 
-    g_addrSelectItem = sig::ResolveSig(gd, serverModule, "CCSPlayer_WeaponServices::SelectItem", errorOut, errorOutLen);
+    g_addrSelectItem = gameconfig::ResolveSig(gd, serverModule, "CCSPlayer_WeaponServices::SelectItem", errorOut, errorOutLen);
     if (!g_addrSelectItem)
     {
         g_status = "failed: SelectItem sig";
         return false;
     }
 
-    g_addrGetSlot = sig::ResolveSig(gd, serverModule, "CCSPlayer_WeaponServices::GetSlot", errorOut, errorOutLen);
+    g_addrGetSlot = gameconfig::ResolveSig(gd, serverModule, "CCSPlayer_WeaponServices::GetSlot", errorOut, errorOutLen);
     if (!g_addrGetSlot)
     {
         g_status = "failed: GetSlot sig";

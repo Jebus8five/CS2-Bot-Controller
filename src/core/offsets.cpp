@@ -1,39 +1,40 @@
+#include "core/gameconfig.h"
 // Override structure offsets from gamedata.json (platform-aware)
 
-#include "version_targets.h"
+#include "offsets.h"
 #include "nlohmann/json.hpp"
 #include "core/cs2_sdk/schema.h"
-#include "sig_scan.h"
+#include "core/memory_module.h"
 
 #include <cstdint>
 #include <cstdio>
 
-namespace cs2bc::targets {
+namespace cs2bc::offsets {
 // Each offset: gamedata[name].offsets[platform], else keep code default
 void LoadFromGamedata(const nlohmann::json& gd)
 {
-    g_botProfile = sig::FindPlatformOffset(gd, "CCSBot::Profile", g_botProfile);
-    g_profAggression = sig::FindPlatformOffset(gd, "BotProfile::Aggression", g_profAggression);
-    g_profSkill = sig::FindPlatformOffset(gd, "BotProfile::Skill", g_profSkill);
-    g_profTeamwork = sig::FindPlatformOffset(gd, "BotProfile::Teamwork", g_profTeamwork);
-    g_profWeaponPref = sig::FindPlatformOffset(gd, "BotProfile::WeaponPref", g_profWeaponPref);
-    g_profWeaponPrefCount = sig::FindPlatformOffset(gd, "BotProfile::WeaponPrefCount", g_profWeaponPrefCount);
-    g_profCost = sig::FindPlatformOffset(gd, "BotProfile::Cost", g_profCost);
-    g_profDifficulty = sig::FindPlatformOffset(gd, "BotProfile::Difficulty", g_profDifficulty);
-    g_profReactionTime = sig::FindPlatformOffset(gd, "BotProfile::ReactionTime", g_profReactionTime);
-    g_profAttackDelay = sig::FindPlatformOffset(gd, "BotProfile::AttackDelay", g_profAttackDelay);
-    g_profLookAccelAtk = sig::FindPlatformOffset(gd, "BotProfile::LookAngleMaxAccelAttacking", g_profLookAccelAtk);
-    g_profLookStiffAtk = sig::FindPlatformOffset(gd, "BotProfile::LookAngleStiffnessAttacking", g_profLookStiffAtk);
-    g_profLookDampAtk = sig::FindPlatformOffset(gd, "BotProfile::LookAngleDampingAttacking", g_profLookDampAtk);
-    g_buyInitialDelay = sig::FindPlatformOffset(gd, "BuyState::InitialDelay", g_buyInitialDelay);
-    g_buyDoneBuying = sig::FindPlatformOffset(gd, "BuyState::DoneBuying", g_buyDoneBuying);
-    g_entIdentityEHandle = sig::FindPlatformOffset(gd, "CEntityIdentity::EHandle", g_entIdentityEHandle);
-    g_servicesPawn = sig::FindPlatformOffset(gd, "CCSPlayer_MovementServices::Pawn", g_servicesPawn);
-    g_moveVelocity = sig::FindPlatformOffset(gd, "CMoveData::Velocity", g_moveVelocity);
-    g_moveAbsOrigin = sig::FindPlatformOffset(gd, "CMoveData::AbsOrigin", g_moveAbsOrigin);
-    g_vtIdxPlayerRunCommand = sig::FindPlatformOffset(gd, "vtidx::PlayerRunCommand", g_vtIdxPlayerRunCommand);
-    g_vtIdxFinishMove = sig::FindPlatformOffset(gd, "vtidx::FinishMove", g_vtIdxFinishMove);
-    g_vtIdxDropWeapon = sig::FindPlatformOffset(gd, "vtidx::DropWeapon", g_vtIdxDropWeapon);
+    g_botProfile = gameconfig::FindPlatformOffset(gd, "CCSBot::Profile", g_botProfile);
+    g_profAggression = gameconfig::FindPlatformOffset(gd, "BotProfile::Aggression", g_profAggression);
+    g_profSkill = gameconfig::FindPlatformOffset(gd, "BotProfile::Skill", g_profSkill);
+    g_profTeamwork = gameconfig::FindPlatformOffset(gd, "BotProfile::Teamwork", g_profTeamwork);
+    g_profWeaponPref = gameconfig::FindPlatformOffset(gd, "BotProfile::WeaponPref", g_profWeaponPref);
+    g_profWeaponPrefCount = gameconfig::FindPlatformOffset(gd, "BotProfile::WeaponPrefCount", g_profWeaponPrefCount);
+    g_profCost = gameconfig::FindPlatformOffset(gd, "BotProfile::Cost", g_profCost);
+    g_profDifficulty = gameconfig::FindPlatformOffset(gd, "BotProfile::Difficulty", g_profDifficulty);
+    g_profReactionTime = gameconfig::FindPlatformOffset(gd, "BotProfile::ReactionTime", g_profReactionTime);
+    g_profAttackDelay = gameconfig::FindPlatformOffset(gd, "BotProfile::AttackDelay", g_profAttackDelay);
+    g_profLookAccelAtk = gameconfig::FindPlatformOffset(gd, "BotProfile::LookAngleMaxAccelAttacking", g_profLookAccelAtk);
+    g_profLookStiffAtk = gameconfig::FindPlatformOffset(gd, "BotProfile::LookAngleStiffnessAttacking", g_profLookStiffAtk);
+    g_profLookDampAtk = gameconfig::FindPlatformOffset(gd, "BotProfile::LookAngleDampingAttacking", g_profLookDampAtk);
+    g_buyInitialDelay = gameconfig::FindPlatformOffset(gd, "BuyState::InitialDelay", g_buyInitialDelay);
+    g_buyDoneBuying = gameconfig::FindPlatformOffset(gd, "BuyState::DoneBuying", g_buyDoneBuying);
+    g_entIdentityEHandle = gameconfig::FindPlatformOffset(gd, "CEntityIdentity::EHandle", g_entIdentityEHandle);
+    g_servicesPawn = gameconfig::FindPlatformOffset(gd, "CCSPlayer_MovementServices::Pawn", g_servicesPawn);
+    g_moveVelocity = gameconfig::FindPlatformOffset(gd, "CMoveData::Velocity", g_moveVelocity);
+    g_moveAbsOrigin = gameconfig::FindPlatformOffset(gd, "CMoveData::AbsOrigin", g_moveAbsOrigin);
+    g_vtIdxPlayerRunCommand = gameconfig::FindPlatformOffset(gd, "vtidx::PlayerRunCommand", g_vtIdxPlayerRunCommand);
+    g_vtIdxFinishMove = gameconfig::FindPlatformOffset(gd, "vtidx::FinishMove", g_vtIdxFinishMove);
+    g_vtIdxDropWeapon = gameconfig::FindPlatformOffset(gd, "vtidx::DropWeapon", g_vtIdxDropWeapon);
 }
 
 namespace {
@@ -123,4 +124,4 @@ bool LoadFromSchema(char* errorOut, size_t errorOutLen)
     if (initialVelocity >= 0) g_projectileInitialVelocity = initialVelocity;
     return true;
 }
-} // namespace cs2bc::targets
+} // namespace cs2bc::offsets

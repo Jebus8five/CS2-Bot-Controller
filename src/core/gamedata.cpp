@@ -1,6 +1,7 @@
+#include "core/gameconfig.h"
 #include "core/gamedata.h"
 #include "platform.h"
-#include "version_targets.h"
+#include "offsets.h"
 #include <cstdio>
 #include <string>
 namespace cs2bc::gamedata {
@@ -23,7 +24,7 @@ std::string ComputeGamedataPath()
 } // namespace
 
 // Locates gamedata relative to this plugin and validates its server module.
-bool Load(void* serverIface, nlohmann::json& gd, sig::ModuleInfo& serverModule, char* error, size_t maxlen)
+bool Load(void* serverIface, nlohmann::json& gd, modules::ModuleInfo& serverModule, char* error, size_t maxlen)
 {
     std::string gamedataPath = ComputeGamedataPath();
     if (gamedataPath.empty())
@@ -32,13 +33,13 @@ bool Load(void* serverIface, nlohmann::json& gd, sig::ModuleInfo& serverModule, 
         return false;
     }
 
-    if (!cs2bc::sig::LoadGamedata(gamedataPath.c_str(), gd))
+    if (!cs2bc::gameconfig::LoadGamedata(gamedataPath.c_str(), gd))
     {
         std::snprintf(error, maxlen, "Failed to load gamedata: %s", gamedataPath.c_str());
         return false;
     }
 
-    serverModule = cs2bc::sig::ModuleFromInterfacePtr(serverIface);
+    serverModule = cs2bc::modules::ModuleFromInterfacePtr(serverIface);
     if (!serverModule)
     {
         std::snprintf(error, maxlen, "ModuleFromInterfacePtr returned null");
@@ -46,7 +47,7 @@ bool Load(void* serverIface, nlohmann::json& gd, sig::ModuleInfo& serverModule, 
     }
 
     // Resolve non-Schema offsets before installing hooks that read targets
-    cs2bc::targets::LoadFromGamedata(gd);
+    cs2bc::offsets::LoadFromGamedata(gd);
 
     return true;
 }

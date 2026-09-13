@@ -1,7 +1,7 @@
 #include "ProjectileBirthAlign.h"
 
 #include "ccsbot_slot.h"
-#include "version_targets.h"
+#include "offsets.h"
 
 #include <array>
 #include <atomic>
@@ -37,10 +37,10 @@ int g_failed = 0;
 void* ResolveSceneNode(void* entity)
 {
     void* body = nullptr;
-    if (!GuardedRead(entity, targets::g_entBodyComponent, body) || !body) return nullptr;
+    if (!GuardedRead(entity, offsets::g_entBodyComponent, body) || !body) return nullptr;
 
     void* node = nullptr;
-    return GuardedRead(body, targets::g_bodySceneNode, node) ? node : nullptr;
+    return GuardedRead(body, offsets::g_bodySceneNode, node) ? node : nullptr;
 }
 
 // Writes all projectile fields that establish the native trajectory
@@ -54,13 +54,13 @@ bool Apply(Pending& pending)
     const size_t vectorSize = sizeof(float) * pending.position.size();
     if (!TryWriteMemoryGuarded(entity, g_initialPositionOffset, pending.position.data(), vectorSize) ||
         !TryWriteMemoryGuarded(entity, g_initialVelocityOffset, pending.velocity.data(), vectorSize) ||
-        !TryWriteMemoryGuarded(entity, targets::g_entAbsVelocity, pending.velocity.data(), vectorSize))
+        !TryWriteMemoryGuarded(entity, offsets::g_entAbsVelocity, pending.velocity.data(), vectorSize))
     {
         return false;
     }
 
     void* node = ResolveSceneNode(entity);
-    if (node) TryWriteMemoryGuarded(node, targets::g_nodeAbsOrigin, pending.position.data(), vectorSize);
+    if (node) TryWriteMemoryGuarded(node, offsets::g_nodeAbsOrigin, pending.position.data(), vectorSize);
     return true;
 }
 } // namespace

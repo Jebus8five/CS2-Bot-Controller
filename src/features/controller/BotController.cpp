@@ -1,3 +1,4 @@
+#include "core/gameconfig.h"
 #include "core/log.h"
 // CCSBot Update/Upkeep detours
 
@@ -5,9 +6,9 @@
 #include "BotControllerState.h"
 #include "ccsbot_slot.h"
 #include "nlohmann/json.hpp"
-#include "sig_scan.h"
+#include "core/memory_module.h"
 #include "MotionRecorder.h"
-#include "version_targets.h"
+#include "offsets.h"
 #include "hooks.h"
 
 #include <tier0/dbg.h>
@@ -19,7 +20,7 @@
 #include <mutex>
 #include <string>
 
-namespace tg = cs2bc::targets;
+namespace tg = cs2bc::offsets;
 
 namespace cs2bc {
 namespace bot_controller_hooks {
@@ -177,16 +178,16 @@ KHook::Return<void> HookedSetEyeAngles(void* pawn, float* angle) noexcept
 // Resolve a sig from gamedata against the loaded server.dll.
 } // namespace
 
-bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
+bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen)
 {
-    g_addrUpdate = sig::ResolveSig(gd, serverModule, "CCSBot::Update", errorOut, errorOutLen);
+    g_addrUpdate = gameconfig::ResolveSig(gd, serverModule, "CCSBot::Update", errorOut, errorOutLen);
     if (!g_addrUpdate)
     {
         g_status = "failed: Update sig";
         return false;
     }
 
-    g_addrUpkeep = sig::ResolveSig(gd, serverModule, "CCSBot::Upkeep", errorOut, errorOutLen);
+    g_addrUpkeep = gameconfig::ResolveSig(gd, serverModule, "CCSBot::Upkeep", errorOut, errorOutLen);
     if (!g_addrUpkeep)
     {
         g_status = "failed: Upkeep sig";
@@ -195,7 +196,7 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
 
     // UpdateLookAngles is optional
     char ulaErr[256] = { 0 };
-    g_addrUpdateLookAngles = sig::ResolveSig(gd, serverModule, "CCSBot::UpdateLookAngles", ulaErr, sizeof(ulaErr));
+    g_addrUpdateLookAngles = gameconfig::ResolveSig(gd, serverModule, "CCSBot::UpdateLookAngles", ulaErr, sizeof(ulaErr));
     if (!g_addrUpdateLookAngles)
     {
         BC_LOG_WARN("[BotController] CCSBot::UpdateLookAngles sig not resolved (%s); replay view-drive disabled\n", ulaErr);
@@ -204,7 +205,7 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
     // SetEyeAngles is optional; without it replay view falls back to
     // the (smoothing) UpdateLookAngles hook only.
     char seaErr[256] = { 0 };
-    g_addrSetEyeAngles = sig::ResolveSig(gd, serverModule, "CCSPlayerPawn::SetEyeAngles", seaErr, sizeof(seaErr));
+    g_addrSetEyeAngles = gameconfig::ResolveSig(gd, serverModule, "CCSPlayerPawn::SetEyeAngles", seaErr, sizeof(seaErr));
     if (!g_addrSetEyeAngles)
     {
         BC_LOG_WARN("[BotController] CCSPlayerPawn::SetEyeAngles sig not resolved (%s); replay 1:1 view disabled\n", seaErr);

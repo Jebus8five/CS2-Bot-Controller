@@ -3,12 +3,12 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
-#include "sig_scan.h"
+#include "core/memory_module.h"
 
 namespace cs2bc {
 namespace buy_controller_hooks {
 // Resolve sig + offsets and install the detour.
-bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen);
+bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, char* errorOut, size_t errorOutLen);
 
 void Remove();
 

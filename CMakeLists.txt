@@ -211,9 +211,10 @@ add_library(
     src/features/recorder/MotionRecorder.cpp
     src/features/voice/VoiceSender.cpp
     src/features/profile/BotProfile.cpp
-    src/utils/sig_scan.cpp
+    src/core/memory_module.cpp
+    src/core/gameconfig.cpp
     src/core/cs2_sdk/schema.cpp
-    src/core/version_targets.cpp
+    src/core/offsets.cpp
     src/utils/platform.cpp
     src/features/projectiles/ProjectileBirthAlign.cpp
     src/core/cs2_sdk/entity/ccsbot_slot.cpp
@@ -245,7 +246,7 @@ target_include_directories(
     src/features/projectiles
     src/features/voice
     src/features/profile
-    ${CMAKE_SOURCE_DIR}/third_party
+    ${CMAKE_SOURCE_DIR}/libraries
     ${GENERATED_DIR}
     ${HL2SDK}/thirdparty/protobuf-3.21.8/src
     ${MMS}/core
@@ -389,15 +390,6 @@ add_custom_command(
         "${CMAKE_BINARY_DIR}/package/addons/metamod"
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${CMAKE_BINARY_DIR}/package/addons/BotController"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${CMAKE_BINARY_DIR}/package/addons/BotController/licenses"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/third_party/NOTICE"
-        "${CMAKE_SOURCE_DIR}/third_party/COPYING.GPL3"
-        "${CMAKE_BINARY_DIR}/package/addons/BotController/licenses"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${spdlog_SOURCE_DIR}/LICENSE"
-        "${CMAKE_BINARY_DIR}/package/addons/BotController/licenses/spdlog-LICENSE"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_BINARY_DIR}/BotController.vdf"
         "${CMAKE_BINARY_DIR}/package/addons/metamod/BotController.vdf"
