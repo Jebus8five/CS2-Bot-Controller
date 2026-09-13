@@ -1,5 +1,5 @@
 #include "core/gameconfig.h"
-// Override structure offsets from gamedata.json (platform-aware)
+// Override structure offsets from gamedata.json
 
 #include "offsets.h"
 #include "nlohmann/json.hpp"
