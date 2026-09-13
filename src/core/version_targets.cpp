@@ -2,7 +2,7 @@
 
 #include "version_targets.h"
 #include "nlohmann/json.hpp"
-#include "schema_resolver.h"
+#include "core/cs2_sdk/schema.h"
 #include "sig_scan.h"
 
 #include <cstdint>

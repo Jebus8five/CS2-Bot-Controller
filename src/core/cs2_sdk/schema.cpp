@@ -1,6 +1,6 @@
 // Resolves live server field offsets through SchemaSystem_001
 
-#include "schema_resolver.h"
+#include "core/cs2_sdk/schema.h"
 
 #include <schemasystem/schemasystem.h>
 #include "schemasystem/schematypes.h"
@@ -25,7 +25,8 @@ using CreateInterfaceFn = void* (*)(const char*, int*);
 namespace {
 ISchemaSystem* g_schemaSystem = nullptr;
 CSchemaSystemTypeScope* g_serverScope = nullptr;
-std::unordered_map<std::string, int> g_offsetCache; // NOLINT(bugprone-throwing-static-initialization)
+using FieldMap = std::unordered_map<std::string, int>;
+std::unordered_map<std::string, FieldMap> g_classCache; // NOLINT(bugprone-throwing-static-initialization)
 
 #ifdef _WIN32
 constexpr const char* kSchemaModuleName = "schemasystem.dll";
@@ -125,41 +126,34 @@ bool Init(char* errorOut, size_t errorOutLen)
     return true;
 }
 
-// Returns one declared field offset, or -1 when it cannot be resolved
+// Caches the declared fields of each class while validating their bounds.
 int GetFieldOffset(const char* className, const char* fieldName)
 {
     if (!g_serverScope || !className || !fieldName) return -1;
-
-    const std::string key = std::string(className) + "::" + fieldName;
-    const auto cached = g_offsetCache.find(key);
-    if (cached != g_offsetCache.end()) return cached->second;
-
-    CSchemaClassInfo* classInfo = g_serverScope->FindDeclaredClass(className).Get();
-    if (!classInfo || !classInfo->m_pFields)
+    auto table = g_classCache.find(className);
+    if (table == g_classCache.end())
     {
-        g_offsetCache.emplace(key, -1);
-        return -1;
+        FieldMap fields;
+        CSchemaClassInfo* info = g_serverScope->FindDeclaredClass(className).Get();
+        if (info && info->m_pFields)
+        {
+            for (uint16_t i = 0; i < info->m_nFieldCount; ++i)
+            {
+                const auto& field = info->m_pFields[i];
+                const int offset = field.m_nSingleInheritanceOffset;
+                if (field.m_pszName && offset >= 0 && offset < info->m_nSize) fields.emplace(field.m_pszName, offset);
+            }
+        }
+        table = g_classCache.emplace(className, std::move(fields)).first;
     }
-
-    for (uint16_t i = 0; i < classInfo->m_nFieldCount; ++i)
-    {
-        const SchemaClassFieldData_t& field = classInfo->m_pFields[i];
-        if (!field.m_pszName || std::strcmp(field.m_pszName, fieldName) != 0) continue;
-
-        const int offset = field.m_nSingleInheritanceOffset;
-        if (offset < 0 || offset >= classInfo->m_nSize) break;
-        g_offsetCache.emplace(key, offset);
-        return offset;
-    }
-
-    g_offsetCache.emplace(key, -1);
-    return -1;
+    const auto field = table->second.find(fieldName);
+    return field == table->second.end() ? -1 : field->second;
 }
 
 // Clears the cached interface, type scope, and field offsets
 void Reset()
 {
-    g_offsetCache.clear();
+    g_classCache.clear();
     g_serverScope = nullptr;
     g_schemaSystem = nullptr;
 }

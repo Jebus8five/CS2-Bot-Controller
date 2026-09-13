@@ -1,34 +1,29 @@
+#include "core/log.h"
 // BotController native Metamod:Source plugin entry point.
 
 #include "plugin.h"
 
 #include <cstdio>
-#include <string>
 
-#include <eiface.h>
 #include <icvar.h>
 #include <convar.h>
 #include <interfaces/interfaces.h>
-#include <networksystem/inetworkmessages.h>
-#include <tier0/dbg.h>
 
 #include <nlohmann/json.hpp> // NOLINT(misc-include-cleaner)
 
 #include "ISmmPluginExt.h"
+#include "core/interfaces.h"
+#include "core/gamedata.h"
 #include "WeaponLocker.h"
 #include "BotController.h"
 #include "BuyController.h"
 #include "BuyControllerState.h"
 #include "InputInjector.h"
 #include "MotionRecorder.h"
-#include "VoiceSender.h"
-#include "dispatch.h"
 #include "WeaponLockerState.h"
 #include "BotControllerState.h"
-#include "commands.h"
 #include "sig_scan.h"
-#include "schema_resolver.h"
-#include "platform.h"
+#include "core/cs2_sdk/schema.h"
 #include "ProjectileBirthAlign.h"
 #include "version_targets.h"
 
@@ -41,140 +36,72 @@ namespace cs2bc {
 
 BotControllerPlugin g_plugin;
 
-namespace {
-
-// addons/<name>/bin/<platform>/<lib> -> up 3 dirs -> addons/<name>/gamedata.json
-std::string ComputeGamedataPath()
-{
-    std::string p = cs2bc::SelfModulePath();
-    if (p.empty()) return "";
-    for (int i = 0; i < 3; ++i)
-    {
-        size_t slash = p.find_last_of("/\\");
-        if (slash == std::string::npos) return "";
-        p.resize(slash);
-    }
-    return p + "/gamedata.json";
-}
-
-} // namespace
-
+// Initializes interfaces and features, rolling back a failed load.
 bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool /*late*/)
 {
     PLUGIN_SAVEVARS();
 
-    if (!KHook::__exported__khook)
+    if (!log::Init(g_SMAPI->GetBaseDir(), error, maxlen)) return false;
+    const bool loaded = [&]() -> bool {
+        if (!KHook::__exported__khook)
+        {
+            std::snprintf(error, maxlen, "Metamod with KHook support is required");
+            return false;
+        }
+
+        if (!interfaces::Init(ismm, error, maxlen)) return false;
+
+        char schemaError[256] = { 0 };
+        if (!cs2bc::schema::Init(schemaError, sizeof(schemaError)))
+        {
+            std::snprintf(error, maxlen, "Schema initialization failed: %s", schemaError);
+            return false;
+        }
+        if (!cs2bc::targets::LoadFromSchema(schemaError, sizeof(schemaError)))
+        {
+            cs2bc::schema::Reset();
+            std::snprintf(error, maxlen, "Schema target resolution failed: %s", schemaError);
+            return false;
+        }
+        if (cs2bc::projectile_birth_align::ConfigureOffsets(cs2bc::targets::g_projectileInitialPosition,
+                                                            cs2bc::targets::g_projectileInitialVelocity) != 0)
+        {
+            BC_LOG_WARN("[BotController] projectile birth alignment offsets unavailable\n");
+        }
+        ConVar_Register(FCVAR_RELEASE | FCVAR_GAMEDLL);
+        m_convarsRegistered = true;
+
+        nlohmann::json gd;
+        sig::ModuleInfo serverModule;
+        if (!gamedata::Load(interfaces::ServerInterface(), gd, serverModule, error, maxlen)) return false;
+
+        if (!cs2bc::weapon_locker_hooks::Install(gd, serverModule, error, maxlen)) return false;
+
+        if (!cs2bc::bot_controller_hooks::Install(gd, serverModule, error, maxlen)) return false;
+
+        // BuyController is optional; missing sig only disables buy control
+        char buyErr[256] = { 0 };
+        if (!cs2bc::buy_controller_hooks::Install(gd, serverModule, buyErr, sizeof(buyErr)))
+        {
+            BC_LOG_WARN("[BotController] BuyController::Install failed (%s); bot buy control disabled\n", buyErr);
+        }
+
+        // movement hooks for record/replay
+        char injErr[256] = { 0 };
+        if (!cs2bc::input_injector::Install(gd, serverModule, injErr, sizeof(injErr)))
+        {
+            BC_LOG_WARN("[BotController] InputInjector::Install failed (%s); record/replay movement will be a no-op\n", injErr);
+        }
+
+        return true;
+    }();
+    if (!loaded)
     {
-        std::snprintf(error, maxlen, "Metamod with KHook support is required");
+        BC_LOG_ERROR("Load failed: %s", error);
+        Unload(nullptr, 0);
         return false;
     }
-
-    g_pCVar = static_cast<ICvar*>(ismm->GetEngineFactory()(CVAR_INTERFACE_VERSION, nullptr));
-    if (!g_pCVar)
-    {
-        std::snprintf(error, maxlen, "Failed to get ICvar (%s) via engine factory", CVAR_INTERFACE_VERSION);
-        return false;
-    }
-
-    char schemaError[256] = { 0 };
-    if (!cs2bc::schema::Init(schemaError, sizeof(schemaError)))
-    {
-        std::snprintf(error, maxlen, "Schema initialization failed: %s", schemaError);
-        return false;
-    }
-    if (!cs2bc::targets::LoadFromSchema(schemaError, sizeof(schemaError)))
-    {
-        cs2bc::schema::Reset();
-        std::snprintf(error, maxlen, "Schema target resolution failed: %s", schemaError);
-        return false;
-    }
-    if (cs2bc::projectile_birth_align::ConfigureOffsets(cs2bc::targets::g_projectileInitialPosition,
-                                                        cs2bc::targets::g_projectileInitialVelocity) != 0)
-    {
-        Warning("[BotController] projectile birth alignment offsets unavailable\n");
-    }
-    ConVar_Register(FCVAR_RELEASE | FCVAR_GAMEDLL);
-
-    // IVEngineServer2::ClientCommand
-    cs2bc::dispatch::g_engine = static_cast<IVEngineServer2*>(ismm->GetEngineFactory()(INTERFACEVERSION_VENGINESERVER, nullptr));
-    if (!cs2bc::dispatch::g_engine)
-    {
-        std::snprintf(error, maxlen, "Failed to get IVEngineServer2 (%s)", INTERFACEVERSION_VENGINESERVER);
-        return false;
-    }
-
-    // Need ISource2GameClients only as the anchor for sig-scan
-    void* serverIface = ismm->GetServerFactory()(INTERFACEVERSION_SERVERGAMECLIENTS, nullptr);
-    if (!serverIface)
-    {
-        std::snprintf(error, maxlen, "Failed to get ISource2GameClients (%s)", INTERFACEVERSION_SERVERGAMECLIENTS);
-        return false;
-    }
-
-    // Engine interface used by console command output (ClientPrintf).
-    cs2bc::commands::g_engine = cs2bc::dispatch::g_engine;
-
-    // Server-side command executor for issuing bot "buy" commands.
-    cs2bc::dispatch::g_gameClients = static_cast<ISource2GameClients*>(serverIface);
-
-    // NetworkMessages lets the C ABI send recorded voice frames to clients.
-    auto* networkMessages = static_cast<INetworkMessages*>(ismm->GetEngineFactory()(NETWORKMESSAGES_INTERFACE_VERSION, nullptr));
-    if (!networkMessages)
-    {
-        networkMessages = static_cast<INetworkMessages*>(ismm->GetServerFactory()(NETWORKMESSAGES_INTERFACE_VERSION, nullptr));
-    }
-    cs2bc::voice_sender::SetInterfaces(cs2bc::dispatch::g_engine, networkMessages);
-    if (!networkMessages)
-    {
-        Warning("[BotController] network messages interface unavailable; voice send disabled\n");
-    }
-
-    std::string gamedataPath = ComputeGamedataPath();
-    if (gamedataPath.empty())
-    {
-        std::snprintf(error, maxlen, "Failed to compute gamedata.json path");
-        return false;
-    }
-
-    nlohmann::json gd;
-    if (!cs2bc::sig::LoadGamedata(gamedataPath.c_str(), gd))
-    {
-        std::snprintf(error, maxlen, "Failed to load gamedata: %s", gamedataPath.c_str());
-        return false;
-    }
-
-    cs2bc::sig::ModuleInfo serverModule = cs2bc::sig::ModuleFromInterfacePtr(serverIface);
-    if (!serverModule)
-    {
-        std::snprintf(error, maxlen, "ModuleFromInterfacePtr returned null");
-        return false;
-    }
-
-    // Resolve non-Schema offsets before installing hooks that read targets
-    cs2bc::targets::LoadFromGamedata(gd);
-
-    if (!cs2bc::weapon_locker_hooks::Install(gd, serverModule, error, maxlen)) return false;
-
-    if (!cs2bc::bot_controller_hooks::Install(gd, serverModule, error, maxlen))
-    {
-        cs2bc::weapon_locker_hooks::Remove();
-        return false;
-    }
-
-    // BuyController is optional; missing sig only disables buy control
-    char buyErr[256] = { 0 };
-    if (!cs2bc::buy_controller_hooks::Install(gd, serverModule, buyErr, sizeof(buyErr)))
-    {
-        Warning("[BotController] BuyController::Install failed (%s); bot buy control disabled\n", buyErr);
-    }
-
-    // movement hooks for record/replay
-    char injErr[256] = { 0 };
-    if (!cs2bc::input_injector::Install(gd, serverModule, injErr, sizeof(injErr)))
-    {
-        Warning("[BotController] InputInjector::Install failed (%s); record/replay movement will be a no-op\n", injErr);
-    }
-
+    BC_LOG_INFO("Loaded %s, built %s", GetVersion(), GetDate());
     return true;
 }
 
@@ -204,6 +131,7 @@ const char* BotControllerPlugin::GetDate() { return BUILD_TIMESTAMP; }
 // Returns the plugin log tag.
 const char* BotControllerPlugin::GetLogTag() { return "BC"; }
 
+// Drains hooks before releasing feature state, interfaces, and logging.
 bool BotControllerPlugin::Unload(char* /*error*/, size_t /*maxlen*/)
 {
     // Drain movement callbacks before releasing their recording and replay state.
@@ -217,13 +145,13 @@ bool BotControllerPlugin::Unload(char* /*error*/, size_t /*maxlen*/)
     cs2bc::weapon_locker_state::ClearAll();
     cs2bc::bot_controller_state::ClearAllAll();
     cs2bc::bot_controller_state::ClearAllAim();
-    cs2bc::dispatch::g_engine = nullptr;
-    cs2bc::dispatch::g_gameClients = nullptr;
-    cs2bc::voice_sender::SetInterfaces(nullptr, nullptr);
-    cs2bc::commands::g_engine = nullptr;
+    interfaces::Reset();
     cs2bc::schema::Reset();
-    ConVar_Unregister();
+    if (m_convarsRegistered) ConVar_Unregister();
+    m_convarsRegistered = false;
     g_pCVar = nullptr;
+    BC_LOG_INFO("Plugin unloaded");
+    log::Close();
     return true;
 }
 

@@ -35,6 +35,9 @@ class BotControllerPlugin : public ISmmPlugin
     const char* GetDate() override;
     // Returns the plugin log tag.
     const char* GetLogTag() override;
+
+  private:
+    bool m_convarsRegistered = false;
 };
 
 extern BotControllerPlugin g_plugin;

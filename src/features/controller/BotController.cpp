@@ -1,3 +1,4 @@
+#include "core/log.h"
 // CCSBot Update/Upkeep detours
 
 #include "BotController.h"
@@ -197,7 +198,7 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
     g_addrUpdateLookAngles = sig::ResolveSig(gd, serverModule, "CCSBot::UpdateLookAngles", ulaErr, sizeof(ulaErr));
     if (!g_addrUpdateLookAngles)
     {
-        Warning("[BotController] CCSBot::UpdateLookAngles sig not resolved (%s); replay view-drive disabled\n", ulaErr);
+        BC_LOG_WARN("[BotController] CCSBot::UpdateLookAngles sig not resolved (%s); replay view-drive disabled\n", ulaErr);
     }
 
     // SetEyeAngles is optional; without it replay view falls back to
@@ -206,7 +207,7 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
     g_addrSetEyeAngles = sig::ResolveSig(gd, serverModule, "CCSPlayerPawn::SetEyeAngles", seaErr, sizeof(seaErr));
     if (!g_addrSetEyeAngles)
     {
-        Warning("[BotController] CCSPlayerPawn::SetEyeAngles sig not resolved (%s); replay 1:1 view disabled\n", seaErr);
+        BC_LOG_WARN("[BotController] CCSPlayerPawn::SetEyeAngles sig not resolved (%s); replay 1:1 view disabled\n", seaErr);
     }
 #ifdef _WIN32
     else
@@ -239,7 +240,7 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
     {
         if (!g_hookUpdateLookAngles.Install(g_addrUpdateLookAngles, &HookedUpdateLookAngles))
         {
-            Warning("[BotController] hook UpdateLookAngles failed; replay view-drive disabled\n");
+            BC_LOG_WARN("[BotController] hook UpdateLookAngles failed; replay view-drive disabled\n");
             g_hookUpdateLookAngles.Remove();
             g_addrUpdateLookAngles = nullptr;
         }
@@ -250,7 +251,7 @@ bool Install(const nlohmann::json& gd, const sig::ModuleInfo& serverModule, char
     {
         if (!g_hookSetEyeAngles.Install(g_addrSetEyeAngles, &HookedSetEyeAngles))
         {
-            Warning("[BotController] hook SetEyeAngles failed; replay 1:1 view disabled\n");
+            BC_LOG_WARN("[BotController] hook SetEyeAngles failed; replay 1:1 view disabled\n");
             g_hookSetEyeAngles.Remove();
             g_addrSetEyeAngles = nullptr;
         }

@@ -175,6 +175,20 @@ if(NOT EXISTS "${MMS}/third_party/khook/include/khook.hpp")
     message(FATAL_ERROR "Metamod with KHook is required; initialize its recursive submodules.")
 endif()
 
+include(FetchContent)
+FetchContent_Declare(spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.x
+    GIT_SHALLOW TRUE
+)
+set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(spdlog)
+set_target_properties(spdlog PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
+)
+
 set(SDK_SOURCES
     ${HL2SDK}/public/tier0/memoverride.cpp
     ${HL2SDK}/tier1/keyvalues3.cpp
@@ -184,28 +198,33 @@ set(SDK_SOURCES
 add_library(
     BotController SHARED
     src/plugin.cpp
-    src/WeaponLocker/WeaponLocker.cpp
-    src/WeaponLocker/WeaponLockerState.cpp
-    src/BotController/BotController.cpp
-    src/BotController/BotControllerState.cpp
-    src/BuyController/BuyController.cpp
-    src/BuyController/BuyControllerState.cpp
-    src/BotRecorder/InputInjector.cpp
-    src/BotRecorder/MotionRecorder.cpp
-    src/VoiceSender/VoiceSender.cpp
-    src/BotProfile/BotProfile.cpp
-    src/common/sig_scan.cpp
-    src/common/schema_resolver.cpp
-    src/common/version_targets.cpp
-    src/common/platform.cpp
-    src/ProjectileBirthAlign/ProjectileBirthAlign.cpp
-    src/common/ccsbot_slot.cpp
-    src/common/dispatch.cpp
-    src/common/commands.cpp
-    src/common/exports.cpp
+    src/core/log.cpp
+    src/core/interfaces.cpp
+    src/core/gamedata.cpp
+    src/features/weapons/WeaponLocker.cpp
+    src/features/weapons/WeaponLockerState.cpp
+    src/features/controller/BotController.cpp
+    src/features/controller/BotControllerState.cpp
+    src/features/buy/BuyController.cpp
+    src/features/buy/BuyControllerState.cpp
+    src/features/recorder/InputInjector.cpp
+    src/features/recorder/MotionRecorder.cpp
+    src/features/voice/VoiceSender.cpp
+    src/features/profile/BotProfile.cpp
+    src/utils/sig_scan.cpp
+    src/core/cs2_sdk/schema.cpp
+    src/core/version_targets.cpp
+    src/utils/platform.cpp
+    src/features/projectiles/ProjectileBirthAlign.cpp
+    src/core/cs2_sdk/entity/ccsbot_slot.cpp
+    src/bridge/dispatch.cpp
+    src/core/commands.cpp
+    src/bridge/exports.cpp
     ${PROTO_SRCS}
     ${SDK_SOURCES}
 )
+
+target_link_libraries(BotController PRIVATE spdlog::spdlog)
 
 if(ENABLE_FORMAT_CHECK)
     add_dependencies(BotController format-check)
@@ -215,14 +234,17 @@ target_include_directories(
     BotController
     PRIVATE
     src
-    src/common
-    src/WeaponLocker
-    src/BotController
-    src/BuyController
-    src/BotRecorder
-    src/ProjectileBirthAlign
-    src/VoiceSender
-    src/BotProfile
+    src/core
+    src/core/cs2_sdk/entity
+    src/bridge
+    src/utils
+    src/features/weapons
+    src/features/controller
+    src/features/buy
+    src/features/recorder
+    src/features/projectiles
+    src/features/voice
+    src/features/profile
     ${CMAKE_SOURCE_DIR}/third_party
     ${GENERATED_DIR}
     ${HL2SDK}/thirdparty/protobuf-3.21.8/src
@@ -367,6 +389,15 @@ add_custom_command(
         "${CMAKE_BINARY_DIR}/package/addons/metamod"
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${CMAKE_BINARY_DIR}/package/addons/BotController"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_BINARY_DIR}/package/addons/BotController/licenses"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/third_party/NOTICE"
+        "${CMAKE_SOURCE_DIR}/third_party/COPYING.GPL3"
+        "${CMAKE_BINARY_DIR}/package/addons/BotController/licenses"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${spdlog_SOURCE_DIR}/LICENSE"
+        "${CMAKE_BINARY_DIR}/package/addons/BotController/licenses/spdlog-LICENSE"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_BINARY_DIR}/BotController.vdf"
         "${CMAKE_BINARY_DIR}/package/addons/metamod/BotController.vdf"

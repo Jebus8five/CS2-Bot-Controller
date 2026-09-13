@@ -1,3 +1,4 @@
+#include "core/log.h"
 // CS2 movement hooks
 // ProcessMovement (record + apply pre)
 // FinishMove (replay post into MoveData + commit)
@@ -950,8 +951,8 @@ bool Install( // NOLINT(misc-use-internal-linkage)
             g_hookPhysicsSimulate.Remove();
             g_addrPhysicsSimulate = nullptr;
         }
-        Warning("[BotController] PhysicsSimulate hook unavailable (%s); replay falls back to per-subtick boundary (may stutter)\n",
-                psErr[0] ? psErr : "KHook failed");
+        BC_LOG_WARN("[BotController] PhysicsSimulate hook unavailable (%s); replay falls back to per-subtick boundary (may stutter)\n",
+                    psErr[0] ? psErr : "KHook failed");
     }
 
     // FinishMove is hooked lazily from the live vtable on the first ProcessMovement tick.
