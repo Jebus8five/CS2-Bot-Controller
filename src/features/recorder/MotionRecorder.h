@@ -160,6 +160,8 @@ struct ReplayCommandFrame
 bool StartRecord(int slot); // clears old buffer, begins capture
 bool StopRecord(int slot); // stops
 bool IsRecording(int slot);
+// Reports whether any slot has an active recording.
+bool HasAnyRecording();
 int RecordedTickCount(int slot); // <0 on bad slot
 int RecordedSubtickCount(int slot); // <0 on bad slot
 int RecordedCommandCount(int slot); // <0 on bad slot
@@ -199,6 +201,8 @@ bool LoadReplayExtended(int slot,
 bool StartReplay(int slot, bool loop); // play from tick 0
 bool StopReplay(int slot); // stop + clear injection
 bool IsReplaying(int slot);
+// Reports whether any slot has an active replay.
+bool HasAnyReplay();
 int ReplayCursor(int slot); // current tick index, <0 if idle
 int ReplayTotal(int slot); // loaded tick count
 

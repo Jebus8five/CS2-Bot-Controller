@@ -50,12 +50,10 @@ std::unordered_map<void*, WsBinding> g_wsToBinding; // NOLINT(bugprone-throwing-
 void* g_slotToWs[64] = { nullptr };
 std::mutex g_wsToSlotMu;
 
-void RememberWsForBot(void* bot, int slot)
+// Reuses the pawn already validated by the enclosing equipment hook.
+void RememberWsForPawn(void* pawn, int slot)
 {
-    if (!bot || slot < 0 || slot >= 64) return;
-    void* pawn = nullptr;
-    if (!GuardedRead(bot, tg::g_botPawn, pawn)) return;
-    if (!pawn) return;
+    if (!pawn || slot < 0 || slot >= 64) return;
     void* ws = nullptr;
     if (!GuardedRead(pawn, tg::g_pawnWeaponServices, ws)) return;
     if (!ws) return;
@@ -88,7 +86,7 @@ bool IsGrenadeDef(int def) { return def >= 43 && def <= 48; }
 KHook::Return<void> HookedEquipBestWeapon(void* bot, char mustEquip) noexcept
 {
     auto sr = ResolveSlot(bot);
-    if (sr.slot >= 0) RememberWsForBot(bot, sr.slot);
+    if (sr.slot >= 0) RememberWsForPawn(sr.pawn, sr.slot);
     if (sr.slot >= 0 && motion_recorder::IsReplaying(sr.slot)) return { KHook::Action::Supersede };
     LockTarget lt = (sr.slot >= 0) ? weapon_locker_state::Get(sr.slot) : LockTarget::None;
     if (lt != LockTarget::None) return { KHook::Action::Supersede };
@@ -99,7 +97,7 @@ KHook::Return<void> HookedEquipBestWeapon(void* bot, char mustEquip) noexcept
 KHook::Return<void> HookedEquipPistol(void* bot, char mustEquip) noexcept
 {
     auto sr = ResolveSlot(bot);
-    if (sr.slot >= 0) RememberWsForBot(bot, sr.slot);
+    if (sr.slot >= 0) RememberWsForPawn(sr.pawn, sr.slot);
     if (sr.slot >= 0 && motion_recorder::IsReplaying(sr.slot)) return { KHook::Action::Supersede };
     LockTarget lt = (sr.slot >= 0) ? weapon_locker_state::Get(sr.slot) : LockTarget::None;
     if (lt != LockTarget::None) return { KHook::Action::Supersede };
@@ -110,7 +108,7 @@ KHook::Return<void> HookedEquipPistol(void* bot, char mustEquip) noexcept
 KHook::Return<char> HookedSelectItem(void* ws, void* weapon, int flag) noexcept
 {
     // Recording : a human switching weapons calls SelectItem
-    if (weapon)
+    if (weapon && motion_recorder::HasAnyRecording())
     {
         int def = ReadDefIndex(weapon);
         if (def >= 0)

@@ -79,6 +79,9 @@ namespace {
 
 std::array<RecordState, kMaxSlots> g_rec;
 std::array<ReplayState, kMaxSlots> g_rep;
+std::atomic<uint64_t> g_recordingSlots{ 0 };
+std::atomic<uint64_t> g_replayingSlots{ 0 };
+static_assert(kMaxSlots <= 64);
 std::atomic<uint64_t> g_dropHookCallCount{ 0 };
 std::atomic<uint64_t> g_dropHookRecordingCallCount{ 0 };
 std::atomic<uint64_t> g_dropHookPhysicalDropCount{ 0 };
@@ -366,6 +369,7 @@ bool StartRecord(int slot)
     }
     r.currentDef.store(-1, std::memory_order_relaxed);
     r.liveWs.store(nullptr, std::memory_order_relaxed);
+    g_recordingSlots.fetch_or(uint64_t{ 1 } << slot, std::memory_order_release);
     r.recording.store(true, std::memory_order_release);
     return true;
 }
@@ -374,10 +378,14 @@ bool StopRecord(int slot)
 {
     if (!ValidSlot(slot)) return false;
     g_rec[slot].recording.store(false, std::memory_order_release);
+    g_recordingSlots.fetch_and(~(uint64_t{ 1 } << slot), std::memory_order_release);
     return true;
 }
 
 bool IsRecording(int slot) { return ValidSlot(slot) && g_rec[slot].recording.load(std::memory_order_acquire); }
+
+// Skips recording-only work without scanning per-slot state.
+bool HasAnyRecording() { return g_recordingSlots.load(std::memory_order_acquire) != 0; }
 
 int RecordedTickCount(int slot)
 {
@@ -652,6 +660,7 @@ bool StartReplay(int slot, bool loop)
         p.lastEventCursor = -1;
     }
     p.loop.store(loop, std::memory_order_relaxed);
+    g_replayingSlots.fetch_or(uint64_t{ 1 } << slot, std::memory_order_release);
     p.playing.store(true, std::memory_order_release);
     input_injector::ClearUsercmdInjections(slot);
     return true;
@@ -661,11 +670,15 @@ bool StopReplay(int slot)
 {
     if (!ValidSlot(slot)) return false;
     g_rep[slot].playing.store(false, std::memory_order_release);
+    g_replayingSlots.fetch_and(~(uint64_t{ 1 } << slot), std::memory_order_release);
     input_injector::ClearReplayPawn(slot);
     return true;
 }
 
 bool IsReplaying(int slot) { return ValidSlot(slot) && g_rep[slot].playing.load(std::memory_order_acquire); }
+
+// Skips replay-only work without dereferencing engine objects.
+bool HasAnyReplay() { return g_replayingSlots.load(std::memory_order_acquire) != 0; }
 
 int ReplayCursor(int slot)
 {
@@ -1025,17 +1038,16 @@ uint32_t LastDropReplayVectorFlags() { return g_lastDropReplayVectorFlags.load(s
 // Write replay velocity onto the pawn. View replay is driven by SetEyeAngles.
 namespace {
 
-void WriteVelocityToPawn(int slot, void* services, const MovementSnapshot& s)
+// Writes velocity using the pawn validated by the current replay phase.
+void WriteVelocityToPawn(void* pawn, const MovementSnapshot& s)
 {
-    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
     WriteVector3(pawn, tg::g_entAbsVelocity, s.velX, s.velY, s.velZ);
 }
 
 // Writes replay origin through the current body-component scene node.
-void WriteSceneNodeOrigin(int slot, void* services, const MovementSnapshot& s, float zBias = 0.0F)
+void WriteSceneNodeOrigin(void* pawn, const MovementSnapshot& s, float zBias = 0.0F)
 {
-    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
 
     void* node = ResolveSceneNode(pawn);
@@ -1094,15 +1106,15 @@ void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const 
 {
     if (!ValidSlot(slot) || !services || !g_rep[slot].playing.load(std::memory_order_acquire)) return;
 
-    WriteVelocityToPawn(slot, services, tick.pre);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
+    WriteVelocityToPawn(pawn, tick.pre);
     WriteMovementServiceState(services, tick.pre);
 
-    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
 
     WriteField(pawn, tg::g_entMoveType, tick.pre.moveType);
     WriteField(pawn, tg::g_entActualMoveType, tick.pre.actualMoveType);
-    WriteSceneNodeOrigin(slot, services, tick.pre);
+    WriteSceneNodeOrigin(pawn, tick.pre);
     bot_controller_hooks::ApplyReplayEyeAngles(pawn, commandView.pitch, commandView.yaw);
     WriteRawViewAnglesToPawn(pawn, commandView.pitch, commandView.yaw);
     WriteReplayViewHistory(services, pawn, commandView.pitch, commandView.yaw);
@@ -1123,17 +1135,17 @@ void OnReplayPre(int slot, void* services, void* moveData)
         t = p.ticks[cur];
     }
     WriteMoveData(moveData, t.pre);
-    WriteVelocityToPawn(slot, services, t.pre);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
+    WriteVelocityToPawn(pawn, t.pre);
     WriteMovementServiceState(services, t.pre);
     // Feed recorded buttons so the engine's Duck()/ladder logic runs
     WriteField(services, tg::g_servicesButtons, t.pre.buttons);
     WriteField(services, tg::g_servicesButtons1, t.pre.buttons1);
     WriteField(services, tg::g_servicesButtons2, t.pre.buttons2);
-    void* pawn = input_injector::ResolveReplayPawn(slot, services);
     if (pawn)
     {
         WriteField(pawn, tg::g_entMoveType, t.pre.moveType);
-        WriteSceneNodeOrigin(slot, services, t.pre);
+        WriteSceneNodeOrigin(pawn, t.pre);
         bot_controller_hooks::ApplyReplayEyeAngles(pawn, t.pre.pitch, t.pre.yaw);
     }
 }
@@ -1153,7 +1165,8 @@ void OnReplayFinishMove(int slot, void* services, void* moveData)
         t = p.ticks[cur];
     }
     WriteMoveData(moveData, t.post);
-    WriteSceneNodeOrigin(slot, services, t.post, 1000.0F);
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
+    WriteSceneNodeOrigin(pawn, t.post, 1000.0F);
 }
 
 void OnReplayCommit(int slot, void* services)
@@ -1179,6 +1192,7 @@ void OnReplayCommit(int slot, void* services)
                 return;
             }
             p.playing.store(false, std::memory_order_release);
+            g_replayingSlots.fetch_and(~(uint64_t{ 1 } << slot), std::memory_order_release);
             input_injector::ClearReplayPawn(slot);
             return;
         }
@@ -1201,8 +1215,10 @@ void OnReplayCommit(int slot, void* services)
         bot_controller_hooks::ApplyReplayEyeAngles(pawn, t.post.pitch, t.post.yaw);
     }
 
-    WriteVelocityToPawn(slot, services, t.post);
-    WriteSceneNodeOrigin(slot, services, t.post);
+    // SetEyeAngles calls the engine; reacquire ownership after that boundary.
+    pawn = input_injector::ResolveReplayPawn(slot, services);
+    WriteVelocityToPawn(pawn, t.post);
+    WriteSceneNodeOrigin(pawn, t.post);
     WriteMovementServiceState(services, t.post);
 
     p.cursor.store(cur + 1, std::memory_order_relaxed);
@@ -1247,6 +1263,8 @@ void ClearAll()
         g_rep[i].lastAppliedDef.store(-1, std::memory_order_relaxed);
         input_injector::ClearReplayPawn(i);
     }
+    g_recordingSlots.store(0, std::memory_order_release);
+    g_replayingSlots.store(0, std::memory_order_release);
 }
 } // namespace motion_recorder
 } // namespace cs2bc

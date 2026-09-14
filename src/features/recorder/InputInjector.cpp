@@ -214,8 +214,10 @@ int RegisteredSlotForServices(void* services)
     return -1;
 }
 
-int ServicesToSlot(void* services)
+// Optionally returns the field pawn validated during this same resolution.
+int ServicesToSlot(void* services, void** validatedPawn = nullptr)
 {
+    if (validatedPawn) *validatedPawn = nullptr;
     g_slotResolveCalls.fetch_add(1, std::memory_order_relaxed);
     g_lastServices.store(reinterpret_cast<uintptr_t>(services), std::memory_order_relaxed);
     g_lastPawn.store(0, std::memory_order_relaxed);
@@ -232,6 +234,7 @@ int ServicesToSlot(void* services)
     }
     void* pawn = ServicesToPawnField(services);
     if (!PawnOwnsServices(pawn, services)) pawn = nullptr;
+    if (validatedPawn) *validatedPawn = pawn;
 
     PawnControllerHandles handles = ReadPawnControllerHandles(pawn);
     g_lastPawn.store(reinterpret_cast<uintptr_t>(pawn), std::memory_order_relaxed);
@@ -246,10 +249,12 @@ int ServicesToSlot(void* services)
     return ownerSlot;
 }
 
-// services -> pawn -> WeaponServices*, for the recording weapon tap.
-void* ServicesToWeaponServices(int slot, void* services)
+// Reuses this callback's field pawn while retaining registered-pawn precedence.
+void* ServicesToWeaponServices(int slot, void* services, void* validatedPawn)
 {
-    void* pawn = ResolveReplayPawn(slot, services);
+    void* registered = ValidSlotIndex(slot) ? g_slotPawns[slot].load(std::memory_order_acquire) : nullptr;
+    void* pawn = validatedPawn;
+    if (!pawn || (registered && registered != pawn)) pawn = ResolveReplayPawn(slot, services);
     if (!pawn) return nullptr;
     void* weaponServices = nullptr;
     return GuardedRead(pawn, tg::g_pawnWeaponServices, weaponServices) ? weaponServices : nullptr;
@@ -404,33 +409,23 @@ void ClearUsercmdInjections(int slot)
     g_movementHeldMasks[slot] = 0;
 }
 
-// Reports whether a slot has injections waiting for command processing
+// Queries pending input ownership without changing press/release state.
 namespace {
 
-bool HasUsercmdInjection(int slot)
+struct UsercmdWork
 {
-    if (!ValidSlotIndex(slot)) return false;
+    bool injection;
+    bool suppression;
+    bool movement;
+};
+
+// Takes one consistent snapshot instead of locking once per input kind.
+UsercmdWork GetUsercmdWork(int slot)
+{
+    if (!ValidSlotIndex(slot)) return {};
 
     std::scoped_lock lock(g_usercmdInjectionMutex);
-    return !g_usercmdInjections[slot].empty();
-}
-
-// Reports whether a slot has button suppressions waiting for command processing
-bool HasUsercmdSuppression(int slot)
-{
-    if (!ValidSlotIndex(slot)) return false;
-
-    std::scoped_lock lock(g_usercmdInjectionMutex);
-    return !g_usercmdSuppressions[slot].empty();
-}
-
-// Reports whether a slot has an active analog movement override
-bool HasUsercmdMovement(int slot)
-{
-    if (!ValidSlotIndex(slot)) return false;
-
-    std::scoped_lock lock(g_usercmdInjectionMutex);
-    return !g_usercmdMovements[slot].empty();
+    return { !g_usercmdInjections[slot].empty(), !g_usercmdSuppressions[slot].empty(), !g_usercmdMovements[slot].empty() };
 }
 
 // Replaces Bot AI analog movement after the final command is generated
@@ -614,7 +609,8 @@ void EnsureVtableHooks(void* services);
 KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexcept
 {
     g_hookCalls.fetch_add(1, std::memory_order_relaxed);
-    int slot = ServicesToSlot(services);
+    void* validatedPawn = nullptr;
+    int slot = ServicesToSlot(services, &validatedPawn);
     g_lastSlot.store(slot, std::memory_order_relaxed);
 
     // Lazily hook FinishMove from the live services vtable on first tick.
@@ -629,7 +625,7 @@ KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexce
     // Recording weapon tap
     if (recording)
     {
-        motion_recorder::SetLiveWs(slot, ServicesToWeaponServices(slot, services));
+        motion_recorder::SetLiveWs(slot, ServicesToWeaponServices(slot, services, validatedPawn));
         if (!g_physicsActive) motion_recorder::OnCapturePre(slot, services, moveData);
     }
 
@@ -657,6 +653,12 @@ KHook::Return<void> ProcessMovementPost(void*, void*) noexcept
 KHook::Return<void> HookedFinishMove(void* services, void* cmd, void* moveData) noexcept
 {
     g_finishMoveCalls.fetch_add(1, std::memory_order_relaxed);
+    if (!motion_recorder::HasAnyReplay())
+    {
+        // Every pre callback still owns a frame, including nested idle calls.
+        g_finishFrames.push_back({ -1, services, moveData, false, false });
+        return { KHook::Action::Ignore };
+    }
     int slot = ServicesToSlot(services);
     bool replaying = slot >= 0 && slot < kMaxSlots && motion_recorder::IsReplaying(slot);
 
@@ -695,9 +697,7 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
     int slot = ServicesToSlot(services);
     bool recording = slot >= 0 && slot < kMaxSlots && motion_recorder::IsRecording(slot);
     bool replaying = slot >= 0 && slot < kMaxSlots && motion_recorder::IsReplaying(slot);
-    bool hasUsercmdInjection = HasUsercmdInjection(slot);
-    bool hasUsercmdSuppression = HasUsercmdSuppression(slot);
-    bool hasUsercmdMovement = HasUsercmdMovement(slot);
+    const auto [hasUsercmdInjection, hasUsercmdSuppression, hasUsercmdMovement] = replaying ? UsercmdWork{} : GetUsercmdWork(slot);
 
     if (cmd && (recording || replaying || hasUsercmdInjection || hasUsercmdSuppression || hasUsercmdMovement))
     {
@@ -856,6 +856,12 @@ KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
 {
     projectile_birth_align::ProcessPending();
     g_physicsSimulateCalls.fetch_add(1, std::memory_order_relaxed);
+    if (!motion_recorder::HasAnyRecording() && !motion_recorder::HasAnyReplay())
+    {
+        // Keep the matching post callback from consuming an outer frame.
+        g_physicsFrames.push_back({ -1, nullptr, nullptr, false, false });
+        return { KHook::Action::Ignore };
+    }
     int slot = ControllerToSlot(controller);
     g_lastPhysicsSlot.store(slot, std::memory_order_relaxed);
     void* services = (slot >= 0 && slot < kMaxSlots) ? g_slotServices[slot].load(std::memory_order_acquire) : nullptr;
@@ -893,6 +899,7 @@ std::atomic<bool> g_vtHooksTried{ false };
 
 void EnsureVtableHooks(void* services)
 {
+    if (g_vtHooksTried.load(std::memory_order_acquire)) return;
     if (g_vtHooksTried.exchange(true, std::memory_order_acq_rel)) return;
     if (!services) return;
     void** vt = nullptr;

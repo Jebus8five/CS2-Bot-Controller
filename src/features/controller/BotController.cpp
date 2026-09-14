@@ -170,6 +170,7 @@ KHook::Return<void> HookedUpdateLookAngles(void* bot) noexcept
 // Engine eye-angle
 KHook::Return<void> HookedSetEyeAngles(void* pawn, float* angle) noexcept
 {
+    if (!motion_recorder::HasAnyReplay()) return { KHook::Action::Ignore };
     int slot = pawn ? ControllerSlotForPawn(pawn) : -1;
     if (slot >= 0 && motion_recorder::IsReplaying(slot)) return { KHook::Action::Supersede };
     return { KHook::Action::Ignore };
