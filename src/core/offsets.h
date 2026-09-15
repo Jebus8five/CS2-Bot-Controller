@@ -8,7 +8,11 @@
 
 namespace cs2bc::offsets {
 // Engine Teleport virtual slot, required for replay start positioning.
-inline int g_vtIdxTeleport = -1;
+#ifdef _WIN32
+inline int g_vtIdxTeleport = 163;
+#else
+inline int g_vtIdxTeleport = 162;
+#endif
 // ---- CCSBot ----
 
 // AI-ran-this-tick byte flag; set to 1 to fake a completed tick

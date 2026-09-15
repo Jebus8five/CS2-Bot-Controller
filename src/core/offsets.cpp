@@ -13,7 +13,7 @@ namespace cs2bc::offsets {
 // Each offset: gamedata[name].offsets[platform], else keep code default
 void LoadFromGamedata(const nlohmann::json& gd)
 {
-    g_vtIdxTeleport = gameconfig::FindPlatformOffset(gd, "CBaseEntity_Teleport", -1);
+    g_vtIdxTeleport = gameconfig::FindPlatformOffset(gd, "CBaseEntity_Teleport", g_vtIdxTeleport);
     g_botProfile = gameconfig::FindPlatformOffset(gd, "CCSBot::Profile", g_botProfile);
     g_profAggression = gameconfig::FindPlatformOffset(gd, "BotProfile::Aggression", g_profAggression);
     g_profSkill = gameconfig::FindPlatformOffset(gd, "BotProfile::Skill", g_profSkill);
