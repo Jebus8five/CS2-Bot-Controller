@@ -7,6 +7,7 @@
 #include "WeaponLocker.h"
 #include "ccsbot_slot.h"
 #include "hooks.h"
+#include "core/log.h"
 #include "offsets.h"
 
 #include <algorithm>
@@ -46,7 +47,7 @@ struct RecordState
     std::vector<SubtickMove> subs;
     std::vector<ReplayCommandFrameData> commands;
     // Subtick moves seen on PlayerRunCommand, awaiting the matching
-    // ProcessMovement post that commits them to a tick.
+    // PhysicsSimulate post that commits them to a tick.
     std::vector<SubtickMove> pendingSubs;
     ReplayCommandFrameData pendingCommand{};
     bool havePendingCommand{ false };
@@ -63,6 +64,7 @@ struct RecordState
 struct ReplayState
 {
     std::atomic<bool> playing{ false };
+    std::atomic<bool> needsInitialTeleport{ false };
     std::atomic<bool> loop{ false };
     std::vector<ReplayTick> ticks;
     std::vector<SubtickMove> subs;
@@ -291,7 +293,7 @@ bool ReadSnapshot(int slot, void* services, MovementSnapshot& out)
 
 bool StartRecord(int slot)
 {
-    if (!ValidSlot(slot)) return false;
+    if (!ValidSlot(slot) || !input_injector::RecorderReady()) return false;
     RecordState& r = g_rec[slot];
     {
         std::scoped_lock lk(r.mu);
@@ -586,7 +588,12 @@ bool LoadReplayExtended(int slot,
 
 bool StartReplay(int slot, bool loop)
 {
-    if (!ValidSlot(slot)) return false;
+    if (!ValidSlot(slot) || !input_injector::RecorderReady()) return false;
+    if (tg::g_vtIdxTeleport < 0)
+    {
+        BC_LOG_WARN("Cannot start replay: CBaseEntity_Teleport gamedata is missing\n");
+        return false;
+    }
     ReplayState& p = g_rep[slot];
     {
         std::scoped_lock lk(p.mu);
@@ -599,6 +606,7 @@ bool StartReplay(int slot, bool loop)
         p.lastEventCursor = -1;
     }
     p.loop.store(loop, std::memory_order_relaxed);
+    p.needsInitialTeleport.store(true, std::memory_order_release);
     g_replayingSlots.fetch_or(uint64_t{ 1 } << slot, std::memory_order_release);
     p.playing.store(true, std::memory_order_release);
     input_injector::ClearUsercmdInjections(slot);
@@ -911,22 +919,15 @@ void WriteVelocityToPawn(void* pawn, const MovementSnapshot& s)
 }
 
 // Writes replay origin through the current body-component scene node.
-void WriteSceneNodeOrigin(void* pawn, const MovementSnapshot& s, float zBias = 0.0F)
+void WriteSceneNodeOrigin(void* pawn, const MovementSnapshot& s)
 {
     if (!pawn) return;
 
     void* node = ResolveSceneNode(pawn);
     if (!node) return;
 
-    const float values[3] = { s.originX, s.originY, s.originZ + zBias };
+    const float values[3] = { s.originX, s.originY, s.originZ };
     TryWriteMemoryGuarded(node, tg::g_nodeAbsOrigin, values, sizeof(values));
-}
-
-// Write origin + velocity into CMoveData.
-void WriteMoveData(void* moveData, const MovementSnapshot& s)
-{
-    WriteVector3(moveData, tg::g_moveAbsOrigin, s.originX, s.originY, s.originZ);
-    WriteVector3(moveData, tg::g_moveVelocity, s.velX, s.velY, s.velZ);
 }
 
 // Restores duck and ladder state through guarded field writes.
@@ -972,6 +973,27 @@ void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const 
     if (!ValidSlot(slot) || !services || !g_rep[slot].playing.load(std::memory_order_acquire)) return;
 
     void* pawn = input_injector::ResolveReplayPawn(slot, services);
+    if (!pawn) return;
+    if (g_rep[slot].needsInitialTeleport.exchange(false, std::memory_order_acq_rel))
+    {
+        // Publish the initial origin through the engine even when movement is idle.
+        void** vtable = nullptr;
+        void* target = nullptr;
+        if (tg::g_vtIdxTeleport < 0 || !SafeRead(pawn, 0, vtable) || !vtable ||
+            !SafeRead(vtable, tg::g_vtIdxTeleport * static_cast<int>(sizeof(void*)), target) || !target)
+        {
+            BC_LOG_WARN("Cannot position replay pawn for slot %d: Teleport unavailable\n", slot);
+            StopReplay(slot);
+            return;
+        }
+        const float position[3] = { tick.pre.originX, tick.pre.originY, tick.pre.originZ };
+        const float velocity[3] = { tick.pre.velX, tick.pre.velY, tick.pre.velZ };
+        using TeleportFn = void(BC_FASTCALL*)(void*, const float*, const float*, const float*);
+        reinterpret_cast<TeleportFn>(target)(pawn, position, nullptr, velocity);
+        if (!IsReplaying(slot)) return;
+        pawn = input_injector::ResolveReplayPawn(slot, services);
+        if (!pawn) return;
+    }
     WriteVelocityToPawn(pawn, tick.pre);
     WriteMovementServiceState(services, tick.pre);
 
@@ -981,60 +1003,14 @@ void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const 
     WriteField(pawn, tg::g_entActualMoveType, tick.pre.actualMoveType);
     WriteSceneNodeOrigin(pawn, tick.pre);
     bot_controller_hooks::ApplyReplayEyeAngles(pawn, commandView.pitch, commandView.yaw);
+    pawn = input_injector::ResolveReplayPawn(slot, services);
+    if (!pawn) return;
     WriteRawViewAnglesToPawn(pawn, commandView.pitch, commandView.yaw);
     WriteReplayViewHistory(services, pawn, commandView.pitch, commandView.yaw);
 }
 
-// ProcessMovement (pre): seed CMoveData + pawn + moveType with pre state.
-void OnReplayPre(int slot, void* services, void* moveData)
-{
-    if (!ValidSlot(slot) || !services || !moveData) return;
-    ReplayState& p = g_rep[slot];
-    if (!p.playing.load(std::memory_order_acquire)) return;
-    ReplayTick t{};
-    {
-        std::scoped_lock lk(p.mu);
-        int total = static_cast<int>(p.ticks.size());
-        int cur = p.cursor.load(std::memory_order_relaxed);
-        if (cur >= total) return; // commit handler will stop/loop
-        t = p.ticks[cur];
-    }
-    WriteMoveData(moveData, t.pre);
-    void* pawn = input_injector::ResolveReplayPawn(slot, services);
-    WriteVelocityToPawn(pawn, t.pre);
-    WriteMovementServiceState(services, t.pre);
-    // Feed recorded buttons so the engine's Duck()/ladder logic runs
-    WriteField(services, tg::g_servicesButtons, t.pre.buttons);
-    WriteField(services, tg::g_servicesButtons1, t.pre.buttons1);
-    WriteField(services, tg::g_servicesButtons2, t.pre.buttons2);
-    if (pawn)
-    {
-        WriteField(pawn, tg::g_entMoveType, t.pre.moveType);
-        WriteSceneNodeOrigin(pawn, t.pre);
-        bot_controller_hooks::ApplyReplayEyeAngles(pawn, t.pre.pitch, t.pre.yaw);
-    }
-}
-
-// FinishMove (pre): write post snapshot into CMoveData + scene-node origin.
-void OnReplayFinishMove(int slot, void* services, void* moveData)
-{
-    if (!ValidSlot(slot) || !services || !moveData) return;
-    ReplayState& p = g_rep[slot];
-    if (!p.playing.load(std::memory_order_acquire)) return;
-    ReplayTick t{};
-    {
-        std::scoped_lock lk(p.mu);
-        int total = static_cast<int>(p.ticks.size());
-        int cur = p.cursor.load(std::memory_order_relaxed);
-        if (cur >= total) return;
-        t = p.ticks[cur];
-    }
-    WriteMoveData(moveData, t.post);
-    void* pawn = input_injector::ResolveReplayPawn(slot, services);
-    WriteSceneNodeOrigin(pawn, t.post, 1000.0F);
-}
-
-void OnReplayCommit(int slot, void* services)
+// Applies the end snapshot only after the complete native simulation.
+void OnReplayCommit(int slot, void* services, bool simulated)
 {
     if (!ValidSlot(slot) || !services) return;
     ReplayState& p = g_rep[slot];
@@ -1052,6 +1028,7 @@ void OnReplayCommit(int slot, void* services)
             if (p.loop.load(std::memory_order_relaxed) && total > 0)
             {
                 p.cursor.store(0, std::memory_order_relaxed);
+                p.needsInitialTeleport.store(true, std::memory_order_release);
                 p.lastAppliedDef.store(-1, std::memory_order_relaxed);
                 p.lastEventCursor = -1;
                 return;
@@ -1061,6 +1038,8 @@ void OnReplayCommit(int slot, void* services)
             input_injector::ClearReplayPawn(slot);
             return;
         }
+        // Empty simulation calls must not consume an unplayed command frame.
+        if (!simulated) return;
         t = p.ticks[cur];
     }
 

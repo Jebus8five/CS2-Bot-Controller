@@ -7,6 +7,8 @@
 #include <nlohmann/json.hpp>
 
 namespace cs2bc::offsets {
+// Engine Teleport virtual slot, required for replay start positioning.
+inline int g_vtIdxTeleport = -1;
 // ---- CCSBot ----
 
 // AI-ran-this-tick byte flag; set to 1 to fake a completed tick
@@ -80,11 +82,6 @@ inline int g_pawnViewAnglePrevious = 0xAF4;
 inline int g_pawnServerViewAngleChanges = 0xA80;
 // m_angEyeAngles (QAngle) — written each replay tick alongside v_angle
 inline int g_pawnEyeAngles = 0x1368;
-
-// ---- CBaseCSGrenadeProjectile ----
-
-inline int g_projectileInitialPosition = -1;
-inline int g_projectileInitialVelocity = -1;
 
 // ---- CCSPlayer_WeaponServices ----
 

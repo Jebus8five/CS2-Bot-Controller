@@ -6,7 +6,6 @@
 #include "BuyControllerState.h"
 #include "BotProfile.h"
 #include "VoiceSender.h"
-#include "ProjectileBirthAlign.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -36,30 +35,8 @@ extern "C" BC_EXPORT int BotController_IsLocked(int slot, int kind)
     return cs2bc::dispatch::IsLocked(slot, static_cast<cs2bc::LockKind>(kind));
 }
 
-// ABI 21 removes the optional recorder diagnostic query exports.
+// ABI 21 keeps the native command-based projectile replay path without birth alignment exports.
 extern "C" BC_EXPORT int BotController_GetVersion() { return 21; }
-
-// Configures native projectile birth fields for the current server build
-extern "C" BC_EXPORT int BotController_SetProjectileBirthAlignOffsets(int initialPositionOffset, int initialVelocityOffset)
-{
-    return cs2bc::projectile_birth_align::ConfigureOffsets(initialPositionOffset, initialVelocityOffset);
-}
-
-// Queues one projectile's recorded birth position and velocity
-extern "C" BC_EXPORT int
-BotController_QueueProjectileBirthAlign(uint64_t entityPtr, float posX, float posY, float posZ, float velX, float velY, float velZ)
-{
-    return cs2bc::projectile_birth_align::Queue(entityPtr, posX, posY, posZ, velX, velY, velZ);
-}
-
-// Clears pending native projectile alignment writes
-extern "C" BC_EXPORT int BotController_ClearProjectileBirthAlign() { return cs2bc::projectile_birth_align::Clear(); }
-
-// Returns native projectile alignment diagnostics
-extern "C" BC_EXPORT int BotController_GetProjectileBirthAlignStatus(cs2bc::projectile_birth_align::Status* out, int size)
-{
-    return cs2bc::projectile_birth_align::GetStatus(out, size);
-}
 
 // Create an independently cancellable usercmd injection
 extern "C" BC_EXPORT int64_t BotController_InjectUsercmd(int slot, uint64_t buttonMask, int durationMs)

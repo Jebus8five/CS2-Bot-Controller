@@ -217,7 +217,6 @@ add_library(
     src/core/cs2_sdk/schema.cpp
     src/core/offsets.cpp
     src/utils/platform.cpp
-    src/features/projectiles/ProjectileBirthAlign.cpp
     src/core/cs2_sdk/entity/ccsbot_slot.cpp
     src/bridge/dispatch.cpp
     src/core/commands.cpp
@@ -244,7 +243,6 @@ target_include_directories(
     src/features/controller
     src/features/buy
     src/features/recorder
-    src/features/projectiles
     src/features/voice
     src/features/profile
     ${CMAKE_SOURCE_DIR}/libraries

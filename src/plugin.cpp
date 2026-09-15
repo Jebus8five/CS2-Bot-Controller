@@ -24,7 +24,6 @@
 #include "BotControllerState.h"
 #include "core/memory_module.h"
 #include "core/cs2_sdk/schema.h"
-#include "ProjectileBirthAlign.h"
 #include "offsets.h"
 
 #define VERSION_STRING  "v" SEMVER " @ " GITHUB_SHA
@@ -62,11 +61,6 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
             cs2bc::schema::Reset();
             std::snprintf(error, maxlen, "Schema target resolution failed: %s", schemaError);
             return false;
-        }
-        if (cs2bc::projectile_birth_align::ConfigureOffsets(cs2bc::offsets::g_projectileInitialPosition,
-                                                            cs2bc::offsets::g_projectileInitialVelocity) != 0)
-        {
-            BC_LOG_WARN("projectile birth alignment offsets unavailable\n");
         }
         ConVar_Register(FCVAR_RELEASE | FCVAR_GAMEDLL);
         m_convarsRegistered = true;
@@ -138,7 +132,6 @@ bool BotControllerPlugin::Unload(char* /*error*/, size_t /*maxlen*/)
     // Drain movement callbacks before releasing their recording and replay state.
     cs2bc::input_injector::Remove();
     cs2bc::motion_recorder::ClearAll();
-    cs2bc::projectile_birth_align::Clear();
     cs2bc::buy_controller_hooks::Remove();
     cs2bc::buy_controller_state::ClearAll();
     cs2bc::bot_controller_hooks::Remove();

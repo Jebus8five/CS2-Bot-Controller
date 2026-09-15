@@ -1,8 +1,8 @@
 #include "core/gameconfig.h"
 #include "core/log.h"
 // CS2 movement hooks
-// ProcessMovement (record + apply pre)
-// FinishMove (replay post into MoveData + commit)
+// PhysicsSimulate (record/replay frame boundary)
+// ProcessMovement (live services discovery)
 // PlayerRunCommand(subtick record + re-inject)
 
 #include "networkbasetypes.pb.h"
@@ -14,7 +14,6 @@
 #include "ccsbot_slot.h"
 #include "core/memory_module.h"
 #include "MotionRecorder.h"
-#include "ProjectileBirthAlign.h"
 #include "usercmd.pb.h"
 #include "offsets.h"
 #include "hooks.h"
@@ -46,12 +45,10 @@ constexpr uint64_t kInMoveRight = 1ULL << 10;
 constexpr uint64_t kMovementButtonMask = kInForward | kInBack | kInMoveLeft | kInMoveRight;
 
 void* g_addrProcessMovement = nullptr;
-void* g_addrFinishMove = nullptr;
 void* g_addrPlayerRunCommand = nullptr;
 void* g_addrPhysicsSimulate = nullptr;
 
 hooks::NativeHook<void, void*, void*> g_hookProcessMovement;
-hooks::NativeHook<void, void*, void*, void*> g_hookFinishMove;
 hooks::NativeHook<void, void*, void*> g_hookPlayerRunCommand;
 hooks::NativeHook<void, void*> g_hookPhysicsSimulate;
 
@@ -59,12 +56,10 @@ struct MovementFrame
 {
     int slot;
     void* services;
-    void* moveData;
     bool recording;
     bool replaying;
+    bool seeded = false;
 };
-thread_local std::vector<MovementFrame> g_processFrames;
-thread_local std::vector<MovementFrame> g_finishFrames;
 thread_local std::vector<MovementFrame> g_physicsFrames;
 bool g_installed = false;
 // True once PhysicsSimulate is hooked
@@ -458,87 +453,31 @@ void ApplyReplayDrop(int slot, void* services)
     motion_recorder::DropReplayEventWeapon(slot, services, event);
 }
 
-// ---- ProcessMovement: record pre/post + replay pre ----
-
-// Defined after HookedFinishMove
+// Installs the command hook from the live movement-services vtable.
 void EnsureVtableHooks(void* services);
 
-// Captures the pre-state and retains invocation-local recording ownership.
-KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexcept
+// Discovers live services without modifying any substep simulation state.
+KHook::Return<void> HookedProcessMovement(void* services, void*) noexcept
 {
+    EnsureVtableHooks(services);
     void* validatedPawn = nullptr;
     int slot = pawn_binding::ServicesToSlot(services, &validatedPawn);
-
-    // Lazily hook FinishMove from the live services vtable on first tick.
-    EnsureVtableHooks(services);
-
-    // Cache slot -> services so PhysicsSimulate
-    if (slot >= 0 && slot < kMaxSlots) g_slotServices[slot].store(services, std::memory_order_release);
-
-    bool recording = slot >= 0 && slot < kMaxSlots && motion_recorder::IsRecording(slot);
-    bool replaying = slot >= 0 && slot < kMaxSlots && motion_recorder::IsReplaying(slot);
-
-    // Recording weapon tap
-    if (recording)
+    if (slot >= 0 && slot < kMaxSlots)
     {
-        motion_recorder::SetLiveWs(slot, pawn_binding::ServicesToWeaponServices(slot, services, validatedPawn));
-        if (!g_physicsActive) motion_recorder::OnCapturePre(slot, services, moveData);
+        g_slotServices[slot].store(services, std::memory_order_release);
+        if (motion_recorder::IsRecording(slot))
+            motion_recorder::SetLiveWs(slot, pawn_binding::ServicesToWeaponServices(slot, services, validatedPawn));
     }
-
-    // Replay: seed CMoveData + pawn with this tick's pre snapshot
-    if (replaying) motion_recorder::OnReplayPre(slot, services, moveData);
-
-    g_processFrames.push_back({ slot, services, moveData, recording, replaying });
     return { KHook::Action::Ignore };
 }
 
-// Completes the matching movement capture after the engine call.
-KHook::Return<void> ProcessMovementPost(void*, void*) noexcept
+// Returns the enclosing simulation boundary for this player.
+MovementFrame* FindPhysicsFrame(int slot)
 {
-    const auto [slot, services, moveData, recording, replaying] = g_processFrames.back();
-    g_processFrames.pop_back();
-
-    // Recording: commit the tick here only when PhysicsSimulate isn't the boundary
-    if (recording && !g_physicsActive) motion_recorder::OnCapturePost(slot, services, moveData);
-    return { KHook::Action::Ignore };
-}
-
-// ---- FinishMove: replay post-write + commit ----
-
-// Applies the recorded end state before FinishMove.
-KHook::Return<void> HookedFinishMove(void* services, void* cmd, void* moveData) noexcept
-{
-    if (!motion_recorder::HasAnyReplay())
-    {
-        // Every pre callback still owns a frame, including nested idle calls.
-        g_finishFrames.push_back({ -1, services, moveData, false, false });
-        return { KHook::Action::Ignore };
-    }
-    int slot = pawn_binding::ServicesToSlot(services);
-    bool replaying = slot >= 0 && slot < kMaxSlots && motion_recorder::IsReplaying(slot);
-
-    // Apply commands before FinishMove so their effects belong to this replay tick.
-    if (replaying && !g_physicsActive) ApplyReplayDrop(slot, services);
-
-    // Before original: write post snapshot into MoveData.
-    if (replaying) motion_recorder::OnReplayFinishMove(slot, services, moveData);
-
-    g_finishFrames.push_back({ slot, services, moveData, false, replaying });
-    return { KHook::Action::Ignore };
-}
-
-// Advances the matching replay frame when PhysicsSimulate is unavailable.
-KHook::Return<void> FinishMovePost(void*, void*, void*) noexcept
-{
-    const auto [slot, services, moveData, recording, replaying] = g_finishFrames.back();
-    g_finishFrames.pop_back();
-
-    // After original: commit moveType/flags + advance the replay cursor
-    if (replaying && !g_physicsActive)
-    {
-        motion_recorder::OnReplayCommit(slot, services);
-    }
-    return { KHook::Action::Ignore };
+    if (slot < 0 || slot >= kMaxSlots) return nullptr;
+    for (auto it = g_physicsFrames.rbegin(); it != g_physicsFrames.rend(); ++it)
+        if (it->slot == slot) return &*it;
+    return nullptr;
 }
 
 // ---- PlayerRunCommand: subtick record + re-inject ----
@@ -675,18 +614,23 @@ void ApplyReplayUserCommand(int slot, void* services, PlayerCommand* pc, CBaseUs
             if (frame.subticks[i].analogLeft != 0.0F) m->set_analog_left_delta(frame.subticks[i].analogLeft);
         }
 
-        motion_recorder::OnReplayCommandPre(slot, services, frame.tick, frame.commandView);
+        // Mark before calling the engine: reentrant commands must not reseed.
+        auto* boundary = FindPhysicsFrame(slot);
+        if (boundary && !boundary->seeded)
+        {
+            boundary->seeded = true;
+            motion_recorder::OnReplayCommandPre(slot, services, frame.tick, frame.commandView);
+        }
     }
 }
 
 // Records or injects the user command before native simulation.
 KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 {
-    projectile_birth_align::ProcessPending();
-
     int slot = pawn_binding::ServicesToSlot(services);
-    bool recording = slot >= 0 && slot < kMaxSlots && motion_recorder::IsRecording(slot);
-    bool replaying = slot >= 0 && slot < kMaxSlots && motion_recorder::IsReplaying(slot);
+    auto* boundary = FindPhysicsFrame(slot);
+    bool recording = boundary && boundary->recording && motion_recorder::IsRecording(slot);
+    bool replaying = boundary && boundary->replaying && motion_recorder::IsReplaying(slot);
     const auto [hasUsercmdInjection, hasUsercmdSuppression, hasUsercmdMovement] = replaying ? UsercmdWork{} : GetUsercmdWork(slot);
 
     if (cmd && (recording || replaying || hasUsercmdInjection || hasUsercmdSuppression || hasUsercmdMovement))
@@ -713,12 +657,10 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 // Captures the per-tick state before any subtick movement.
 KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
 {
-    projectile_birth_align::ProcessPending();
-
     if (!motion_recorder::HasAnyRecording() && !motion_recorder::HasAnyReplay())
     {
         // Keep the matching post callback from consuming an outer frame.
-        g_physicsFrames.push_back({ -1, nullptr, nullptr, false, false });
+        g_physicsFrames.push_back({ -1, nullptr, false, false });
         return { KHook::Action::Ignore };
     }
     int slot = ControllerToSlot(controller);
@@ -728,27 +670,35 @@ KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
     bool recording = slot >= 0 && slot < kMaxSlots && services && motion_recorder::IsRecording(slot);
     bool replaying = slot >= 0 && slot < kMaxSlots && services && motion_recorder::IsReplaying(slot);
 
+    // A nested simulation for this slot belongs to the existing outer boundary.
+    if (FindPhysicsFrame(slot))
+    {
+        g_physicsFrames.push_back({ -1, nullptr, false, false });
+        return { KHook::Action::Ignore };
+    }
+    // Publish ownership before engine callbacks can reenter.
+    g_physicsFrames.push_back({ slot, services, recording, replaying });
+
     // pre: snapshot start-of-tick state once (before any subtick mover).
     if (recording) motion_recorder::OnCapturePre(slot, services, nullptr);
 
     // Client commands are normally handled before this tick's player simulation.
     if (replaying) ApplyReplayDrop(slot, services);
 
-    g_physicsFrames.push_back({ slot, services, nullptr, recording, replaying });
     return { KHook::Action::Ignore };
 }
 
 // Commits the recording and replay state for the matching simulation call.
 KHook::Return<void> PhysicsSimulatePost(void*) noexcept
 {
-    const auto [slot, services, moveData, recording, replaying] = g_physicsFrames.back();
+    const auto [slot, services, recording, replaying, seeded] = g_physicsFrames.back();
     g_physicsFrames.pop_back();
 
     // post: snapshot end-of-tick state + commit one frame
     if (recording) motion_recorder::OnCapturePost(slot, services, nullptr);
     if (replaying)
     {
-        motion_recorder::OnReplayCommit(slot, services);
+        motion_recorder::OnReplayCommit(slot, services, seeded);
     }
     return { KHook::Action::Ignore };
 }
@@ -762,10 +712,6 @@ void EnsureVtableHooks(void* services)
     if (!services) return;
     void** vt = nullptr;
     if (!GuardedRead(services, 0, vt) || !vt) return;
-
-    if (!GuardedRead(static_cast<const void*>(vt), tg::g_vtIdxFinishMove * static_cast<int>(sizeof(void*)), g_addrFinishMove))
-        g_addrFinishMove = nullptr;
-    if (g_addrFinishMove && !g_hookFinishMove.Install(g_addrFinishMove, &HookedFinishMove, &FinishMovePost)) g_addrFinishMove = nullptr;
 
     // PlayerRunCommand (subtick record/re-inject)
     if (!GuardedRead(static_cast<const void*>(vt), tg::g_vtIdxPlayerRunCommand * static_cast<int>(sizeof(void*)), g_addrPlayerRunCommand))
@@ -795,7 +741,7 @@ bool Install( // NOLINT(misc-use-internal-linkage)
         g_status = "failed: ProcessMovement sig";
         return false;
     }
-    if (!g_hookProcessMovement.Install(g_addrProcessMovement, &HookedProcessMovement, &ProcessMovementPost))
+    if (!g_hookProcessMovement.Install(g_addrProcessMovement, &HookedProcessMovement))
     {
         std::snprintf(errorOut, errorOutLen, "hook ProcessMovement failed");
         g_hookProcessMovement.Remove();
@@ -817,11 +763,10 @@ bool Install( // NOLINT(misc-use-internal-linkage)
             g_hookPhysicsSimulate.Remove();
             g_addrPhysicsSimulate = nullptr;
         }
-        BC_LOG_WARN("PhysicsSimulate hook unavailable (%s); replay falls back to per-subtick boundary (may stutter)\n",
-                    psErr[0] ? psErr : "KHook failed");
+        BC_LOG_WARN("PhysicsSimulate hook unavailable (%s); recording and replay are disabled\n", psErr[0] ? psErr : "KHook failed");
     }
 
-    // FinishMove is hooked lazily from the live vtable on the first ProcessMovement tick.
+    // PlayerRunCommand is hooked lazily from the first live movement-services vtable.
     g_installed = true;
     g_status = "ok";
     return true;
@@ -831,11 +776,9 @@ void Remove()
 {
     if (!g_installed) return;
     g_hookProcessMovement.Remove();
-    g_hookFinishMove.Remove();
     g_hookPlayerRunCommand.Remove();
     g_hookPhysicsSimulate.Remove();
     g_addrProcessMovement = nullptr;
-    g_addrFinishMove = nullptr;
     g_addrPlayerRunCommand = nullptr;
     g_addrPhysicsSimulate = nullptr;
     g_physicsActive = false;
@@ -857,6 +800,14 @@ void Remove()
     }
     g_installed = false;
     g_status = "not_attempted";
+}
+
+// Recording and replay require both frame boundaries and command injection.
+bool RecorderReady()
+{
+    if (g_physicsActive && g_subtickActive) return true;
+    BC_LOG_WARN("Cannot start recording/replay: PhysicsSimulate=%d PlayerRunCommand=%d\n", g_physicsActive, g_subtickActive);
+    return false;
 }
 
 const char* Status() { return g_status.c_str(); }

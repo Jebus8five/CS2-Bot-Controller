@@ -12,7 +12,6 @@ public sealed class MotionRecording
     public ReplayTick[] Ticks { get; set; } = Array.Empty<ReplayTick>();
     public SubtickMove[] Subticks { get; set; } = Array.Empty<SubtickMove>();
     public ReplayCommandFrame[] Commands { get; set; } = Array.Empty<ReplayCommandFrame>();
-    public ReplayProjectileEvent[] Projectiles { get; set; } = Array.Empty<ReplayProjectileEvent>();
 }
 
 // File + capture-buffer on top of the native calls
@@ -27,11 +26,7 @@ public static class MotionStore
 
     // Save a slot's recorded motion to a JSON file. Returns tick count, or -1
     // if nothing was recorded
-    public static int SaveToFile(
-        int slot,
-        string path,
-        int tickrate = 64,
-        ReplayProjectileEvent[]? projectiles = null)
+    public static int SaveToFile(int slot, string path, int tickrate = 64)
     {
         var (ticks, subs, commands) = BotController.GetRecordedMotionExtended(slot);
         if (ticks.Length == 0) return -1;
@@ -41,7 +36,6 @@ public static class MotionStore
             Ticks = ticks,
             Subticks = subs,
             Commands = commands,
-            Projectiles = projectiles ?? Array.Empty<ReplayProjectileEvent>(),
         };
         File.WriteAllText(path, JsonSerializer.Serialize(rec, JsonOpts));
         return ticks.Length;

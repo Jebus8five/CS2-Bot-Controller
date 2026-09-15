@@ -28,29 +28,6 @@ namespace BotControllerApi
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
         private static extern int BotController_GetVersion();
 
-        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int BotController_SetProjectileBirthAlignOffsets(
-            int initialPositionOffset,
-            int initialVelocityOffset);
-
-        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int BotController_QueueProjectileBirthAlign(
-            ulong entityPtr,
-            float posX,
-            float posY,
-            float posZ,
-            float velX,
-            float velY,
-            float velZ);
-
-        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int BotController_ClearProjectileBirthAlign();
-
-        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int BotController_GetProjectileBirthAlignStatus(
-            out ProjectileBirthAlignStatus status,
-            int size);
-
         // Imports the native usercmd injection export
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
         private static extern long BotController_InjectUsercmd(
@@ -200,35 +177,6 @@ namespace BotControllerApi
 
         // Native C-ABI version the loaded DLL reports.
         public static int AbiVersion => BotController_GetVersion();
-
-        // Configures native projectile birth offsets for the loaded server build
-        public static bool ConfigureProjectileBirthAlign(int initialPositionOffset, int initialVelocityOffset)
-            => BotController_SetProjectileBirthAlignOffsets(initialPositionOffset, initialVelocityOffset) == 0;
-
-        // Queues one projectile's recorded birth position and velocity
-        public static bool QueueProjectileBirthAlign(
-            nint entityPtr,
-            ReplayVector3 position,
-            ReplayVector3 velocity)
-            => entityPtr != 0 &&
-               BotController_QueueProjectileBirthAlign(
-                   unchecked((ulong)entityPtr),
-                   position.X,
-                   position.Y,
-                   position.Z,
-                   velocity.X,
-                   velocity.Y,
-                   velocity.Z) == 0;
-
-        // Clears pending native projectile birth writes
-        public static int ClearProjectileBirthAlign()
-            => BotController_ClearProjectileBirthAlign();
-
-        // Returns native projectile birth alignment diagnostics
-        public static bool TryGetProjectileBirthAlignStatus(out ProjectileBirthAlignStatus status)
-            => BotController_GetProjectileBirthAlignStatus(
-                   out status,
-                   Marshal.SizeOf<ProjectileBirthAlignStatus>()) == 0;
 
         // Creates an independently cancellable native usercmd injection
         public static long InjectUsercmd(int slot, ulong buttonMask, int durationMs = 0)

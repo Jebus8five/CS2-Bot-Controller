@@ -1,4 +1,10 @@
 {
+  "CBaseEntity_Teleport": {
+    "offsets": {
+      "windows": 163,
+      "linux": 162
+    }
+  },
   "CCSBot::EquipBestWeapon": {
     "signatures": {
       "library": "server",

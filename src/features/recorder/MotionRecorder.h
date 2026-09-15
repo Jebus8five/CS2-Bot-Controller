@@ -166,9 +166,9 @@ int RecordedTickCount(int slot); // <0 on bad slot
 int RecordedSubtickCount(int slot); // <0 on bad slot
 int RecordedCommandCount(int slot); // <0 on bad slot
 
-// ProcessMovement hook: capture pre snapshot
+// PhysicsSimulate hook: capture pre snapshot
 void OnCapturePre(int slot, void* services, void* cmd);
-// ProcessMovement hook: capture post snapshot + commit the tick
+// PhysicsSimulate hook: capture post snapshot + commit the tick
 void OnCapturePost(int slot, void* services, void* cmd);
 // PlayerRunCommand hook: stash this tick's subtick moves (pending).
 void OnCaptureSubticks(int slot, const SubtickMove* moves, int count);
@@ -244,12 +244,8 @@ bool DropHookReady();
 // ---- replay write hooks ----
 // PlayerRunCommand (pre): seed pawn state consumed by weapon and grenade logic
 void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const MovementSnapshot& commandView);
-// ProcessMovement (pre): write pre snapshot into CMoveData + pawn velocity + entity moveType
-void OnReplayPre(int slot, void* services, void* moveData);
-// FinishMove (pre): write post snapshot into CMoveData + scene-node origin.
-void OnReplayFinishMove(int slot, void* services, void* moveData);
-// FinishMove (post): commit post moveType/flags, advance cursor.
-void OnReplayCommit(int slot, void* services);
+// PhysicsSimulate (post): restore the end snapshot and advance the cursor.
+void OnReplayCommit(int slot, void* services, bool simulated);
 
 void ClearAll(); // wipe all record + replay buffers (on unload)
 } // namespace motion_recorder

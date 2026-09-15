@@ -1,4 +1,4 @@
-// KHook for CS2 movement functions (ProcessMovement / PhysicsSimulate / FinishMove / PlayerRunCommand)
+// KHook for CS2 movement functions (ProcessMovement / PhysicsSimulate / PlayerRunCommand)
 
 #pragma once
 
@@ -20,6 +20,9 @@ bool Install(const nlohmann::json& gd, const modules::ModuleInfo& serverModule, 
 void Remove();
 
 const char* Status();
+
+// Requires the frame-boundary and command hooks; logs unavailable capabilities.
+bool RecorderReady();
 
 // Registers the authoritative replay pawn supplied by the managed plugin.
 bool SetReplayPawn(int slot, void* pawn);

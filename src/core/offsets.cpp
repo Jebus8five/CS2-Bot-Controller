@@ -13,6 +13,7 @@ namespace cs2bc::offsets {
 // Each offset: gamedata[name].offsets[platform], else keep code default
 void LoadFromGamedata(const nlohmann::json& gd)
 {
+    g_vtIdxTeleport = gameconfig::FindPlatformOffset(gd, "CBaseEntity_Teleport", -1);
     g_botProfile = gameconfig::FindPlatformOffset(gd, "CCSBot::Profile", g_botProfile);
     g_profAggression = gameconfig::FindPlatformOffset(gd, "BotProfile::Aggression", g_profAggression);
     g_profSkill = gameconfig::FindPlatformOffset(gd, "BotProfile::Skill", g_profSkill);
@@ -118,10 +119,6 @@ bool LoadFromSchema(char* errorOut, size_t errorOutLen)
     g_servicesButtons1 = g_servicesButtons + static_cast<int>(sizeof(uint64_t));
     g_servicesButtons2 = g_servicesButtons1 + static_cast<int>(sizeof(uint64_t));
 
-    const int initialPosition = schema::GetFieldOffset("CBaseCSGrenadeProjectile", "m_vInitialPosition");
-    const int initialVelocity = schema::GetFieldOffset("CBaseCSGrenadeProjectile", "m_vInitialVelocity");
-    if (initialPosition >= 0) g_projectileInitialPosition = initialPosition;
-    if (initialVelocity >= 0) g_projectileInitialVelocity = initialVelocity;
     return true;
 }
 } // namespace cs2bc::offsets
