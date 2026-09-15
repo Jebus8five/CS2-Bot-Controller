@@ -1,4 +1,4 @@
-// P/Invoke wrapper for BotController.dll (ABI 20), check IsCompatible() before use
+// P/Invoke wrapper for BotController.dll (ABI 21), check IsCompatible() before use
 // Main-thread only.
 
 using System.Runtime.InteropServices;
@@ -8,7 +8,7 @@ namespace BotControllerApi
     // Thin static binding over the native exports. No orchestration here.
     public static class BotController
     {
-        private const int ExpectedAbiVersion = 20;
+        private const int ExpectedAbiVersion = 21;
 
         // Sentinel weapon def meaning "any knife"
         public const int KnifeDef = 9001;

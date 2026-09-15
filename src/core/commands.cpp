@@ -258,8 +258,6 @@ CON_COMMAND_F(bc_status, // NOLINT(bugprone-throwing-static-initialization,misc-
 
     commands::PrintToCaller(context, "[BC] state: locks(all=%d aim=%d weapon=%d) buyPlans=%d\n", bot_controller_state::CountAll(),
                             bot_controller_state::CountAim(), weapon_locker_state::CountLocked(), buy_controller_state::CountPlans());
-    commands::PrintToCaller(context, "[BC] drop: captured=%llu attempts=%llu commands=%llu\n", motion_recorder::DropCaptureCount(),
-                            motion_recorder::DropReplayAttemptCount(), motion_recorder::DropReplayNativeCallCount());
 }
 
 CON_COMMAND_F(bc_buy, // NOLINT(bugprone-throwing-static-initialization)

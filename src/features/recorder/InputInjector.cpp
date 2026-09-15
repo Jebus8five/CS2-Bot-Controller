@@ -10,6 +10,7 @@
 #include "playercommand.h"
 
 #include "InputInjector.h"
+#include "PawnBinding.h"
 #include "ccsbot_slot.h"
 #include "core/memory_module.h"
 #include "MotionRecorder.h"
@@ -74,7 +75,6 @@ std::string g_status = "not_attempted"; // NOLINT(bugprone-throwing-static-initi
 
 // slot -> live CCSPlayer_MovementServices*
 std::array<std::atomic<void*>, kMaxSlots> g_slotServices{};
-std::array<std::atomic<void*>, kMaxSlots> g_slotPawns{};
 
 enum class UsercmdInjectionPhase : uint8_t
 {
@@ -118,147 +118,10 @@ std::atomic<int64_t> g_nextUsercmdInjectionId{ 1 };
 std::atomic<int64_t> g_nextUsercmdSuppressionId{ 1 };
 std::atomic<int64_t> g_nextUsercmdMovementId{ 1 };
 
-std::atomic<uint64_t> g_hookCalls{ 0 };
-std::atomic<int> g_lastSlot{ -1 };
-std::atomic<uint64_t> g_finishMoveCalls{ 0 };
-std::atomic<uint64_t> g_playerRunCommandCalls{ 0 };
-std::atomic<uint64_t> g_usercmdMovementApplyCalls{ 0 };
-std::atomic<int> g_lastUsercmdMovementSlot{ -1 };
-std::atomic<int> g_lastUsercmdForwardMove{ 0 };
-std::atomic<int> g_lastUsercmdLeftMove{ 0 };
-std::atomic<uint64_t> g_physicsSimulateCalls{ 0 };
-std::atomic<int> g_lastPhysicsSlot{ -1 };
-std::atomic<uint64_t> g_replayCommitCalls{ 0 };
-std::atomic<uint64_t> g_slotResolveCalls{ 0 };
-std::atomic<uint64_t> g_slotResolveFailures{ 0 };
-std::atomic<uintptr_t> g_lastServices{ 0 };
-std::atomic<uintptr_t> g_lastPawn{ 0 };
-std::atomic<uint32_t> g_lastControllerHandle{ 0 };
-std::atomic<uint32_t> g_lastOriginalControllerHandle{ 0 };
-std::atomic<int> g_lastControllerIndex{ -1 };
-std::atomic<int> g_lastOriginalControllerIndex{ -1 };
-std::atomic<int> g_lastOwnerSlot{ -1 };
-
 bool IsThrowableUtilityDef(int def) { return def >= 43 && def <= 48; }
 
 // Reports whether a slot can index the fixed replay state arrays.
 bool ValidSlotIndex(int slot) { return slot >= 0 && slot < kMaxSlots; }
-
-// Reads the helper pawn field embedded in movement services.
-void* ServicesToPawnField(void* services)
-{
-    void* pawn = nullptr;
-    return GuardedRead(services, tg::g_servicesPawn, pawn) ? pawn : nullptr;
-}
-
-// Verifies that a pawn currently owns the supplied movement services.
-bool PawnOwnsServices(void* pawn, void* services)
-{
-    if (!pawn || !services) return false;
-    void* liveServices = nullptr;
-    return GuardedRead(pawn, tg::g_pawnMovementServices, liveServices) && liveServices == services;
-}
-
-// Registers a readable pawn whose current owner matches the requested slot.
-} // namespace
-
-bool SetReplayPawn(int slot, void* pawn)
-{
-    if (!ValidSlotIndex(slot) || motion_recorder::IsReplaying(slot)) return false;
-    g_slotPawns[slot].store(nullptr, std::memory_order_release);
-    if (!pawn) return false;
-
-    void* identity = nullptr;
-    uint32_t handle = 0;
-    if (!GuardedRead(pawn, tg::g_entIdentity, identity) || !identity || !GuardedRead(identity, tg::g_entIdentityEHandle, handle) ||
-        handle == 0U || handle == 0xFFFFFFFFU)
-        return false;
-
-    int ownerSlot = ControllerSlotForPawn(pawn);
-    if (ownerSlot >= 0 && ownerSlot != slot) return false;
-
-    g_slotPawns[slot].store(pawn, std::memory_order_release);
-    return true;
-}
-
-// Removes a registered pawn before the entity can be recycled.
-void ClearReplayPawn(int slot)
-{
-    if (ValidSlotIndex(slot)) g_slotPawns[slot].store(nullptr, std::memory_order_release);
-}
-
-// Returns a registered pawn only when its movement-services link is current.
-void* ResolveReplayPawn(int slot, void* services)
-{
-    if (ValidSlotIndex(slot))
-    {
-        void* registered = g_slotPawns[slot].load(std::memory_order_acquire);
-        if (PawnOwnsServices(registered, services)) return registered;
-    }
-
-    void* fieldPawn = ServicesToPawnField(services);
-    return PawnOwnsServices(fieldPawn, services) ? fieldPawn : nullptr;
-}
-
-// Finds a registered slot by validating every pawn-to-services link.
-namespace {
-
-int RegisteredSlotForServices(void* services)
-{
-    if (!services) return -1;
-    for (int slot = 0; slot < kMaxSlots; ++slot)
-    {
-        void* pawn = g_slotPawns[slot].load(std::memory_order_acquire);
-        if (PawnOwnsServices(pawn, services)) return slot;
-    }
-    return -1;
-}
-
-// Optionally returns the field pawn validated during this same resolution.
-int ServicesToSlot(void* services, void** validatedPawn = nullptr)
-{
-    if (validatedPawn) *validatedPawn = nullptr;
-    g_slotResolveCalls.fetch_add(1, std::memory_order_relaxed);
-    g_lastServices.store(reinterpret_cast<uintptr_t>(services), std::memory_order_relaxed);
-    g_lastPawn.store(0, std::memory_order_relaxed);
-    g_lastControllerHandle.store(0, std::memory_order_relaxed);
-    g_lastOriginalControllerHandle.store(0, std::memory_order_relaxed);
-    g_lastControllerIndex.store(-1, std::memory_order_relaxed);
-    g_lastOriginalControllerIndex.store(-1, std::memory_order_relaxed);
-    g_lastOwnerSlot.store(-1, std::memory_order_relaxed);
-
-    if (!services)
-    {
-        g_slotResolveFailures.fetch_add(1, std::memory_order_relaxed);
-        return -1;
-    }
-    void* pawn = ServicesToPawnField(services);
-    if (!PawnOwnsServices(pawn, services)) pawn = nullptr;
-    if (validatedPawn) *validatedPawn = pawn;
-
-    PawnControllerHandles handles = ReadPawnControllerHandles(pawn);
-    g_lastPawn.store(reinterpret_cast<uintptr_t>(pawn), std::memory_order_relaxed);
-    g_lastControllerHandle.store(handles.controllerHandle, std::memory_order_relaxed);
-    g_lastOriginalControllerHandle.store(handles.originalControllerHandle, std::memory_order_relaxed);
-    g_lastControllerIndex.store(handles.controllerIndex, std::memory_order_relaxed);
-    g_lastOriginalControllerIndex.store(handles.originalControllerIndex, std::memory_order_relaxed);
-    int ownerSlot = handles.ownerSlot;
-    if (ownerSlot < 0) ownerSlot = RegisteredSlotForServices(services);
-    g_lastOwnerSlot.store(ownerSlot, std::memory_order_relaxed);
-    if (ownerSlot < 0) g_slotResolveFailures.fetch_add(1, std::memory_order_relaxed);
-    return ownerSlot;
-}
-
-// Reuses this callback's field pawn while retaining registered-pawn precedence.
-void* ServicesToWeaponServices(int slot, void* services, void* validatedPawn)
-{
-    void* registered = ValidSlotIndex(slot) ? g_slotPawns[slot].load(std::memory_order_acquire) : nullptr;
-    void* pawn = validatedPawn;
-    if (!pawn || (registered && registered != pawn)) pawn = ResolveReplayPawn(slot, services);
-    if (!pawn) return nullptr;
-    void* weaponServices = nullptr;
-    return GuardedRead(pawn, tg::g_pawnWeaponServices, weaponServices) ? weaponServices : nullptr;
-}
 
 float NormalizeDeg(float a)
 {
@@ -472,11 +335,6 @@ bool ApplyUsercmdMovement(int slot, PlayerCommand* pc, CBaseUserCmdPB* base) // 
 
     base->set_forwardmove(movement.forwardMove * kUsercmdKeyboardMoveScale);
     base->set_leftmove(movement.leftMove * kUsercmdKeyboardMoveScale);
-    g_usercmdMovementApplyCalls.fetch_add(1, std::memory_order_relaxed);
-    g_lastUsercmdMovementSlot.store(slot, std::memory_order_relaxed);
-    g_lastUsercmdForwardMove.store(static_cast<int>(std::lround(movement.forwardMove * kUsercmdKeyboardMoveScale)),
-                                   std::memory_order_relaxed);
-    g_lastUsercmdLeftMove.store(static_cast<int>(std::lround(movement.leftMove * kUsercmdKeyboardMoveScale)), std::memory_order_relaxed);
     for (int index = 0; index < base->subtick_moves_size(); ++index)
     {
         CSubtickMoveStep* step = base->mutable_subtick_moves(index);
@@ -608,10 +466,8 @@ void EnsureVtableHooks(void* services);
 // Captures the pre-state and retains invocation-local recording ownership.
 KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexcept
 {
-    g_hookCalls.fetch_add(1, std::memory_order_relaxed);
     void* validatedPawn = nullptr;
-    int slot = ServicesToSlot(services, &validatedPawn);
-    g_lastSlot.store(slot, std::memory_order_relaxed);
+    int slot = pawn_binding::ServicesToSlot(services, &validatedPawn);
 
     // Lazily hook FinishMove from the live services vtable on first tick.
     EnsureVtableHooks(services);
@@ -625,7 +481,7 @@ KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexce
     // Recording weapon tap
     if (recording)
     {
-        motion_recorder::SetLiveWs(slot, ServicesToWeaponServices(slot, services, validatedPawn));
+        motion_recorder::SetLiveWs(slot, pawn_binding::ServicesToWeaponServices(slot, services, validatedPawn));
         if (!g_physicsActive) motion_recorder::OnCapturePre(slot, services, moveData);
     }
 
@@ -652,14 +508,13 @@ KHook::Return<void> ProcessMovementPost(void*, void*) noexcept
 // Applies the recorded end state before FinishMove.
 KHook::Return<void> HookedFinishMove(void* services, void* cmd, void* moveData) noexcept
 {
-    g_finishMoveCalls.fetch_add(1, std::memory_order_relaxed);
     if (!motion_recorder::HasAnyReplay())
     {
         // Every pre callback still owns a frame, including nested idle calls.
         g_finishFrames.push_back({ -1, services, moveData, false, false });
         return { KHook::Action::Ignore };
     }
-    int slot = ServicesToSlot(services);
+    int slot = pawn_binding::ServicesToSlot(services);
     bool replaying = slot >= 0 && slot < kMaxSlots && motion_recorder::IsReplaying(slot);
 
     // Apply commands before FinishMove so their effects belong to this replay tick.
@@ -682,19 +537,154 @@ KHook::Return<void> FinishMovePost(void*, void*, void*) noexcept
     if (replaying && !g_physicsActive)
     {
         motion_recorder::OnReplayCommit(slot, services);
-        g_replayCommitCalls.fetch_add(1, std::memory_order_relaxed);
     }
     return { KHook::Action::Ignore };
 }
 
 // ---- PlayerRunCommand: subtick record + re-inject ----
 
+// Serializes command fields and subticks into the pending recording frame.
+void CaptureUserCommand(int slot, PlayerCommand* pc, CBaseUserCmdPB* base)
+{
+    // Read this tick's subtick_moves into SubtickMove[] and
+    // stash; OnCapturePost (PhysicsSimulate-post) commits them.
+    int n = base->subtick_moves_size();
+    n = std::min(n, motion_recorder::kMaxSubtickPerTick);
+    SubtickMove moves[motion_recorder::kMaxSubtickPerTick];
+    for (int i = 0; i < n; ++i)
+    {
+        const CSubtickMoveStep& s = base->subtick_moves(i);
+        moves[i].when = s.when();
+        moves[i].button = static_cast<uint32_t>(s.button());
+        moves[i].pressed = s.pressed() ? 1.0F : 0.0F;
+        moves[i].analogForward = s.analog_forward_delta();
+        moves[i].analogLeft = s.analog_left_delta();
+        moves[i].pitchDelta = s.pitch_delta();
+        moves[i].yawDelta = s.yaw_delta();
+    }
+    motion_recorder::OnCaptureSubticks(slot, moves, n);
+
+    ReplayCommandFrameData command{};
+    command.buttons = pc->buttonstates.m_pButtonStates[0];
+    command.buttons1 = pc->buttonstates.m_pButtonStates[1];
+    command.buttons2 = pc->buttonstates.m_pButtonStates[2];
+    command.fields |= motion_recorder::kCommandFieldButtons;
+    if (base->has_forwardmove())
+    {
+        command.forwardMove = base->forwardmove();
+        command.fields |= motion_recorder::kCommandFieldForwardMove;
+    }
+    if (base->has_leftmove())
+    {
+        command.leftMove = base->leftmove();
+        command.fields |= motion_recorder::kCommandFieldLeftMove;
+    }
+    if (base->has_upmove())
+    {
+        command.upMove = base->upmove();
+        command.fields |= motion_recorder::kCommandFieldUpMove;
+    }
+    if (base->has_viewangles())
+    {
+        const CMsgQAngle& view = base->viewangles();
+        command.pitch = view.x();
+        command.yaw = view.y();
+        command.roll = view.z();
+        command.fields |= motion_recorder::kCommandFieldViewAngles;
+    }
+    if (base->has_mousedx() || base->has_mousedy())
+    {
+        command.mouseDx = base->mousedx();
+        command.mouseDy = base->mousedy();
+        command.fields |= motion_recorder::kCommandFieldMouse;
+    }
+    if (base->has_weaponselect())
+    {
+        command.weaponSelect = base->weaponselect();
+        command.fields |= motion_recorder::kCommandFieldWeaponSelect;
+    }
+    if (pc->has_left_hand_desired())
+    {
+        command.leftHandDesired = pc->left_hand_desired() ? 1 : 0;
+        command.fields |= motion_recorder::kCommandFieldLeftHand;
+    }
+    motion_recorder::OnCaptureCommand(slot, command);
+}
+
+// Applies one recorded command before the engine simulates it.
+void ApplyReplayUserCommand(int slot, void* services, PlayerCommand* pc, CBaseUserCmdPB* base)
+{
+    constexpr uint64_t kGrenadeAttackMask = (1ULL << 0) | (1ULL << 11);
+    motion_recorder::ReplayCommandFrame frame{};
+    if (motion_recorder::ReplayCommandFrameForSimulation(slot, frame))
+    {
+        bool suppressUnsafeUtilityAttack =
+            IsThrowableUtilityDef(frame.tick.weaponDefIndex) && frame.weaponSelect < 0 &&
+            !motion_recorder::ReplayWeaponDefsMatch(motion_recorder::BotActiveWeaponDef(slot), frame.tick.weaponDefIndex);
+        if (suppressUnsafeUtilityAttack)
+        {
+            frame.buttons0 &= ~kGrenadeAttackMask;
+            frame.buttons1 &= ~kGrenadeAttackMask;
+            frame.buttons2 &= ~kGrenadeAttackMask;
+        }
+
+        CInButtonStatePB* bp = base->mutable_buttons_pb();
+        bp->set_buttonstate1(frame.buttons0);
+        bp->set_buttonstate2(frame.buttons1);
+        bp->set_buttonstate3(frame.buttons2);
+        pc->buttonstates.m_pButtonStates[0] = frame.buttons0;
+        pc->buttonstates.m_pButtonStates[1] = frame.buttons1;
+        pc->buttonstates.m_pButtonStates[2] = frame.buttons2;
+
+        CMsgQAngle* view = base->mutable_viewangles();
+        view->set_x(frame.commandView.pitch);
+        view->set_y(NormalizeDeg(frame.commandView.yaw));
+        view->set_z((frame.commandFields & motion_recorder::kCommandFieldViewAngles) != 0 ? frame.commandView.roll : 0.0F);
+
+        if ((frame.commandFields & motion_recorder::kCommandFieldForwardMove) != 0) base->set_forwardmove(frame.forwardMove);
+        if ((frame.commandFields & motion_recorder::kCommandFieldLeftMove) != 0) base->set_leftmove(frame.leftMove);
+        if ((frame.commandFields & motion_recorder::kCommandFieldUpMove) != 0) base->set_upmove(frame.upMove);
+        if ((frame.commandFields & motion_recorder::kCommandFieldMouse) != 0)
+        {
+            base->set_mousedx(frame.mouseDx);
+            base->set_mousedy(frame.mouseDy);
+        }
+        if ((frame.commandFields & motion_recorder::kCommandFieldLeftHand) != 0) pc->set_left_hand_desired(frame.leftHandDesired != 0);
+        if (frame.weaponSelect >= 0) base->set_weaponselect(frame.weaponSelect);
+
+        // Replace the command's subtick moves with the recorded set for this tick
+        base->clear_subtick_moves();
+        for (int i = 0; i < frame.subtickCount; ++i)
+        {
+            uint32_t button = frame.subticks[i].button;
+            float pressed = frame.subticks[i].pressed;
+            if (suppressUnsafeUtilityAttack && (button & static_cast<uint32_t>(kGrenadeAttackMask)) != 0)
+            {
+                button &= ~static_cast<uint32_t>(kGrenadeAttackMask);
+                if (button == 0) pressed = 0.0F;
+            }
+
+            CSubtickMoveStep* m = base->add_subtick_moves();
+            m->set_when(frame.subticks[i].when);
+            m->set_button(button);
+            if (button != 0) // digital press/release
+                m->set_pressed(pressed != 0.0F);
+            if (frame.subticks[i].pitchDelta != 0.0F) m->set_pitch_delta(frame.subticks[i].pitchDelta);
+            if (frame.subticks[i].yawDelta != 0.0F) m->set_yaw_delta(frame.subticks[i].yawDelta);
+            if (frame.subticks[i].analogForward != 0.0F) m->set_analog_forward_delta(frame.subticks[i].analogForward);
+            if (frame.subticks[i].analogLeft != 0.0F) m->set_analog_left_delta(frame.subticks[i].analogLeft);
+        }
+
+        motion_recorder::OnReplayCommandPre(slot, services, frame.tick, frame.commandView);
+    }
+}
+
 // Records or injects the user command before native simulation.
 KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 {
     projectile_birth_align::ProcessPending();
-    g_playerRunCommandCalls.fetch_add(1, std::memory_order_relaxed);
-    int slot = ServicesToSlot(services);
+
+    int slot = pawn_binding::ServicesToSlot(services);
     bool recording = slot >= 0 && slot < kMaxSlots && motion_recorder::IsRecording(slot);
     bool replaying = slot >= 0 && slot < kMaxSlots && motion_recorder::IsReplaying(slot);
     const auto [hasUsercmdInjection, hasUsercmdSuppression, hasUsercmdMovement] = replaying ? UsercmdWork{} : GetUsercmdWork(slot);
@@ -705,140 +695,9 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
         auto* pc = reinterpret_cast<PlayerCommand*>(cmd);
         CBaseUserCmdPB* base = pc->mutable_base();
 
-        if (recording)
-        {
-            // Read this tick's subtick_moves into SubtickMove[] and
-            // stash; OnCapturePost (PhysicsSimulate-post) commits them.
-            int n = base->subtick_moves_size();
-            n = std::min(n, motion_recorder::kMaxSubtickPerTick);
-            SubtickMove moves[motion_recorder::kMaxSubtickPerTick];
-            for (int i = 0; i < n; ++i)
-            {
-                const CSubtickMoveStep& s = base->subtick_moves(i);
-                moves[i].when = s.when();
-                moves[i].button = static_cast<uint32_t>(s.button());
-                moves[i].pressed = s.pressed() ? 1.0F : 0.0F;
-                moves[i].analogForward = s.analog_forward_delta();
-                moves[i].analogLeft = s.analog_left_delta();
-                moves[i].pitchDelta = s.pitch_delta();
-                moves[i].yawDelta = s.yaw_delta();
-            }
-            motion_recorder::OnCaptureSubticks(slot, moves, n);
+        if (recording) CaptureUserCommand(slot, pc, base);
 
-            ReplayCommandFrameData command{};
-            command.buttons = pc->buttonstates.m_pButtonStates[0];
-            command.buttons1 = pc->buttonstates.m_pButtonStates[1];
-            command.buttons2 = pc->buttonstates.m_pButtonStates[2];
-            command.fields |= motion_recorder::kCommandFieldButtons;
-            if (base->has_forwardmove())
-            {
-                command.forwardMove = base->forwardmove();
-                command.fields |= motion_recorder::kCommandFieldForwardMove;
-            }
-            if (base->has_leftmove())
-            {
-                command.leftMove = base->leftmove();
-                command.fields |= motion_recorder::kCommandFieldLeftMove;
-            }
-            if (base->has_upmove())
-            {
-                command.upMove = base->upmove();
-                command.fields |= motion_recorder::kCommandFieldUpMove;
-            }
-            if (base->has_viewangles())
-            {
-                const CMsgQAngle& view = base->viewangles();
-                command.pitch = view.x();
-                command.yaw = view.y();
-                command.roll = view.z();
-                command.fields |= motion_recorder::kCommandFieldViewAngles;
-            }
-            if (base->has_mousedx() || base->has_mousedy())
-            {
-                command.mouseDx = base->mousedx();
-                command.mouseDy = base->mousedy();
-                command.fields |= motion_recorder::kCommandFieldMouse;
-            }
-            if (base->has_weaponselect())
-            {
-                command.weaponSelect = base->weaponselect();
-                command.fields |= motion_recorder::kCommandFieldWeaponSelect;
-            }
-            if (pc->has_left_hand_desired())
-            {
-                command.leftHandDesired = pc->left_hand_desired() ? 1 : 0;
-                command.fields |= motion_recorder::kCommandFieldLeftHand;
-            }
-            motion_recorder::OnCaptureCommand(slot, command);
-        }
-
-        if (replaying)
-        {
-            constexpr uint64_t kGrenadeAttackMask = (1ULL << 0) | (1ULL << 11);
-            motion_recorder::ReplayCommandFrame frame{};
-            if (motion_recorder::ReplayCommandFrameForSimulation(slot, frame))
-            {
-                bool suppressUnsafeUtilityAttack =
-                    IsThrowableUtilityDef(frame.tick.weaponDefIndex) && frame.weaponSelect < 0 &&
-                    !motion_recorder::ReplayWeaponDefsMatch(motion_recorder::BotActiveWeaponDef(slot), frame.tick.weaponDefIndex);
-                if (suppressUnsafeUtilityAttack)
-                {
-                    frame.buttons0 &= ~kGrenadeAttackMask;
-                    frame.buttons1 &= ~kGrenadeAttackMask;
-                    frame.buttons2 &= ~kGrenadeAttackMask;
-                }
-
-                CInButtonStatePB* bp = base->mutable_buttons_pb();
-                bp->set_buttonstate1(frame.buttons0);
-                bp->set_buttonstate2(frame.buttons1);
-                bp->set_buttonstate3(frame.buttons2);
-                pc->buttonstates.m_pButtonStates[0] = frame.buttons0;
-                pc->buttonstates.m_pButtonStates[1] = frame.buttons1;
-                pc->buttonstates.m_pButtonStates[2] = frame.buttons2;
-
-                CMsgQAngle* view = base->mutable_viewangles();
-                view->set_x(frame.commandView.pitch);
-                view->set_y(NormalizeDeg(frame.commandView.yaw));
-                view->set_z((frame.commandFields & motion_recorder::kCommandFieldViewAngles) != 0 ? frame.commandView.roll : 0.0F);
-
-                if ((frame.commandFields & motion_recorder::kCommandFieldForwardMove) != 0) base->set_forwardmove(frame.forwardMove);
-                if ((frame.commandFields & motion_recorder::kCommandFieldLeftMove) != 0) base->set_leftmove(frame.leftMove);
-                if ((frame.commandFields & motion_recorder::kCommandFieldUpMove) != 0) base->set_upmove(frame.upMove);
-                if ((frame.commandFields & motion_recorder::kCommandFieldMouse) != 0)
-                {
-                    base->set_mousedx(frame.mouseDx);
-                    base->set_mousedy(frame.mouseDy);
-                }
-                if ((frame.commandFields & motion_recorder::kCommandFieldLeftHand) != 0)
-                    pc->set_left_hand_desired(frame.leftHandDesired != 0);
-                if (frame.weaponSelect >= 0) base->set_weaponselect(frame.weaponSelect);
-
-                // Replace the command's subtick moves with the recorded set for this tick
-                base->clear_subtick_moves();
-                for (int i = 0; i < frame.subtickCount; ++i)
-                {
-                    uint32_t button = frame.subticks[i].button;
-                    float pressed = frame.subticks[i].pressed;
-                    if (suppressUnsafeUtilityAttack && (button & static_cast<uint32_t>(kGrenadeAttackMask)) != 0)
-                    {
-                        button &= ~static_cast<uint32_t>(kGrenadeAttackMask);
-                        if (button == 0) pressed = 0.0F;
-                    }
-
-                    CSubtickMoveStep* m = base->add_subtick_moves();
-                    m->set_when(frame.subticks[i].when);
-                    m->set_button(button);
-                    if (button != 0) // digital press/release
-                        m->set_pressed(pressed != 0.0F);
-                    if (frame.subticks[i].pitchDelta != 0.0F) m->set_pitch_delta(frame.subticks[i].pitchDelta);
-                    if (frame.subticks[i].yawDelta != 0.0F) m->set_yaw_delta(frame.subticks[i].yawDelta);
-                    if (frame.subticks[i].analogForward != 0.0F) m->set_analog_forward_delta(frame.subticks[i].analogForward);
-                    if (frame.subticks[i].analogLeft != 0.0F) m->set_analog_left_delta(frame.subticks[i].analogLeft);
-                }
-
-                motion_recorder::OnReplayCommandPre(slot, services, frame.tick, frame.commandView);
-            }
-        }
+        if (replaying) ApplyReplayUserCommand(slot, services, pc, base);
 
         if (hasUsercmdSuppression && !replaying) ApplyUsercmdSuppressions(slot, pc, base);
         if (hasUsercmdInjection && !replaying) ApplyUsercmdInjections(slot, pc, base);
@@ -855,7 +714,7 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
 {
     projectile_birth_align::ProcessPending();
-    g_physicsSimulateCalls.fetch_add(1, std::memory_order_relaxed);
+
     if (!motion_recorder::HasAnyRecording() && !motion_recorder::HasAnyReplay())
     {
         // Keep the matching post callback from consuming an outer frame.
@@ -863,7 +722,7 @@ KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
         return { KHook::Action::Ignore };
     }
     int slot = ControllerToSlot(controller);
-    g_lastPhysicsSlot.store(slot, std::memory_order_relaxed);
+
     void* services = (slot >= 0 && slot < kMaxSlots) ? g_slotServices[slot].load(std::memory_order_acquire) : nullptr;
 
     bool recording = slot >= 0 && slot < kMaxSlots && services && motion_recorder::IsRecording(slot);
@@ -890,7 +749,6 @@ KHook::Return<void> PhysicsSimulatePost(void*) noexcept
     if (replaying)
     {
         motion_recorder::OnReplayCommit(slot, services);
-        g_replayCommitCalls.fetch_add(1, std::memory_order_relaxed);
     }
     return { KHook::Action::Ignore };
 }
@@ -985,8 +843,7 @@ void Remove()
     g_vtHooksTried.store(false, std::memory_order_release);
     for (auto& s : g_slotServices)
         s.store(nullptr, std::memory_order_release);
-    for (auto& pawn : g_slotPawns)
-        pawn.store(nullptr, std::memory_order_release);
+    pawn_binding::ClearAll();
     {
         std::scoped_lock lock(g_usercmdInjectionMutex);
         for (auto& injections : g_usercmdInjections)
@@ -1004,31 +861,5 @@ void Remove()
 
 const char* Status() { return g_status.c_str(); }
 
-void* ProcessUsercmdAddress() { return g_addrProcessMovement; }
-
-uint64_t HookCallCount() { return g_hookCalls.load(std::memory_order_relaxed); }
-int LastResolvedSlot() { return g_lastSlot.load(std::memory_order_relaxed); }
-uint64_t FinishMoveCallCount() { return g_finishMoveCalls.load(std::memory_order_relaxed); }
-uint64_t PlayerRunCommandCallCount() { return g_playerRunCommandCalls.load(std::memory_order_relaxed); }
-// Reports how many final bot commands received a movement override
-uint64_t UsercmdMovementApplyCount() { return g_usercmdMovementApplyCalls.load(std::memory_order_relaxed); }
-// Reports the last slot whose final bot command was overridden
-int LastUsercmdMovementSlot() { return g_lastUsercmdMovementSlot.load(std::memory_order_relaxed); }
-// Reports the last forward command magnitude written by the override
-int LastUsercmdForwardMove() { return g_lastUsercmdForwardMove.load(std::memory_order_relaxed); }
-// Reports the last left command magnitude written by the override
-int LastUsercmdLeftMove() { return g_lastUsercmdLeftMove.load(std::memory_order_relaxed); }
-uint64_t PhysicsSimulateCallCount() { return g_physicsSimulateCalls.load(std::memory_order_relaxed); }
-int LastPhysicsSlot() { return g_lastPhysicsSlot.load(std::memory_order_relaxed); }
-uint64_t ReplayCommitCount() { return g_replayCommitCalls.load(std::memory_order_relaxed); }
-uint64_t SlotResolveCallCount() { return g_slotResolveCalls.load(std::memory_order_relaxed); }
-uint64_t SlotResolveFailureCount() { return g_slotResolveFailures.load(std::memory_order_relaxed); }
-uintptr_t LastServices() { return g_lastServices.load(std::memory_order_relaxed); }
-uintptr_t LastPawn() { return g_lastPawn.load(std::memory_order_relaxed); }
-uint32_t LastControllerHandle() { return g_lastControllerHandle.load(std::memory_order_relaxed); }
-uint32_t LastOriginalControllerHandle() { return g_lastOriginalControllerHandle.load(std::memory_order_relaxed); }
-int LastControllerIndex() { return g_lastControllerIndex.load(std::memory_order_relaxed); }
-int LastOriginalControllerIndex() { return g_lastOriginalControllerIndex.load(std::memory_order_relaxed); }
-int LastOwnerSlot() { return g_lastOwnerSlot.load(std::memory_order_relaxed); }
 } // namespace input_injector
 } // namespace cs2bc

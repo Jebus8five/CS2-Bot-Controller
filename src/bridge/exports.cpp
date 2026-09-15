@@ -36,7 +36,8 @@ extern "C" BC_EXPORT int BotController_IsLocked(int slot, int kind)
     return cs2bc::dispatch::IsLocked(slot, static_cast<cs2bc::LockKind>(kind));
 }
 
-extern "C" BC_EXPORT int BotController_GetVersion() { return 20; }
+// ABI 21 removes the optional recorder diagnostic query exports.
+extern "C" BC_EXPORT int BotController_GetVersion() { return 21; }
 
 // Configures native projectile birth fields for the current server build
 extern "C" BC_EXPORT int BotController_SetProjectileBirthAlignOffsets(int initialPositionOffset, int initialVelocityOffset)
@@ -320,38 +321,3 @@ extern "C" BC_EXPORT int BotController_SwitchBotWeapon(int slot, int defIndex)
 // Def index of the bot's current active weapon (same normalization as the
 // recorded WeaponDefIndex). <0 if unresolved. For C# to reconcile replay.
 extern "C" BC_EXPORT int BotController_GetBotActiveWeaponDef(int slot) { return cs2bc::motion_recorder::BotActiveWeaponDef(slot); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetHookCallCount() { return cs2bc::input_injector::HookCallCount(); }
-
-extern "C" BC_EXPORT int BotController_GetLastResolvedSlot() { return cs2bc::input_injector::LastResolvedSlot(); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetFinishMoveCallCount() { return cs2bc::input_injector::FinishMoveCallCount(); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetPlayerRunCommandCallCount() { return cs2bc::input_injector::PlayerRunCommandCallCount(); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetPhysicsSimulateCallCount() { return cs2bc::input_injector::PhysicsSimulateCallCount(); }
-
-extern "C" BC_EXPORT int BotController_GetLastPhysicsSlot() { return cs2bc::input_injector::LastPhysicsSlot(); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetReplayCommitCount() { return cs2bc::input_injector::ReplayCommitCount(); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetSlotResolveCallCount() { return cs2bc::input_injector::SlotResolveCallCount(); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetSlotResolveFailureCount() { return cs2bc::input_injector::SlotResolveFailureCount(); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetLastServices() { return static_cast<uint64_t>(cs2bc::input_injector::LastServices()); }
-
-extern "C" BC_EXPORT uint64_t BotController_GetLastPawn() { return static_cast<uint64_t>(cs2bc::input_injector::LastPawn()); }
-
-extern "C" BC_EXPORT uint32_t BotController_GetLastControllerHandle() { return cs2bc::input_injector::LastControllerHandle(); }
-
-extern "C" BC_EXPORT uint32_t BotController_GetLastOriginalControllerHandle()
-{
-    return cs2bc::input_injector::LastOriginalControllerHandle();
-}
-
-extern "C" BC_EXPORT int BotController_GetLastControllerIndex() { return cs2bc::input_injector::LastControllerIndex(); }
-
-extern "C" BC_EXPORT int BotController_GetLastOriginalControllerIndex() { return cs2bc::input_injector::LastOriginalControllerIndex(); }
-
-extern "C" BC_EXPORT int BotController_GetLastOwnerSlot() { return cs2bc::input_injector::LastOwnerSlot(); }

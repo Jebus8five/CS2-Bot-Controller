@@ -238,30 +238,8 @@ bool TakeCurrentReplayDrop(int slot, ReplayDropEvent& event);
 // Drops the recorded item through the bot pawn's native weapon service
 bool DropReplayEventWeapon(int slot, void* services, const ReplayDropEvent& event);
 
-// Drop-event diagnostics exposed through bc_status
-uint64_t DropHookCallCount();
-uint64_t DropHookRecordingCallCount();
-uint64_t DropHookPhysicalDropCount();
-uint64_t DropHookInvalidDefCount();
-uint64_t DropCaptureCount();
-uint64_t DropReplayAttemptCount();
-uint64_t DropReplayHookCallCount();
-uint64_t DropReplayVectorOverrideCount();
-uint64_t DropReplayDetachedCount();
-uint64_t DropReplayNativeCallCount();
+// Reports whether the weapon drop hook is available.
 bool DropHookReady();
-void* DropHookAddress();
-int LastDropCaptureSlot();
-uint32_t LastDropCaptureVectorFlags();
-int LastDropHookSlot();
-int LastDropHookWeaponDef();
-bool LastDropHookWasRecording();
-void* LastDropHookPawn();
-void* LastDropHookTarget();
-void* LastDropHookVelocity();
-int LastDropReplaySlot();
-int LastDropReplayWeaponDef();
-uint32_t LastDropReplayVectorFlags();
 
 // ---- replay write hooks ----
 // PlayerRunCommand (pre): seed pawn state consumed by weapon and grenade logic

@@ -82,27 +82,6 @@ std::array<ReplayState, kMaxSlots> g_rep;
 std::atomic<uint64_t> g_recordingSlots{ 0 };
 std::atomic<uint64_t> g_replayingSlots{ 0 };
 static_assert(kMaxSlots <= 64);
-std::atomic<uint64_t> g_dropHookCallCount{ 0 };
-std::atomic<uint64_t> g_dropHookRecordingCallCount{ 0 };
-std::atomic<uint64_t> g_dropHookPhysicalDropCount{ 0 };
-std::atomic<uint64_t> g_dropHookInvalidDefCount{ 0 };
-std::atomic<uint64_t> g_dropCaptureCount{ 0 };
-std::atomic<uint64_t> g_dropReplayAttemptCount{ 0 };
-std::atomic<uint64_t> g_dropReplayHookCallCount{ 0 };
-std::atomic<uint64_t> g_dropReplayVectorOverrideCount{ 0 };
-std::atomic<uint64_t> g_dropReplayDetachedCount{ 0 };
-std::atomic<uint64_t> g_dropReplayNativeCallCount{ 0 };
-std::atomic<int> g_lastDropCaptureSlot{ -1 };
-std::atomic<uint32_t> g_lastDropCaptureVectorFlags{ ReplayDropVectorNone };
-std::atomic<int> g_lastDropHookSlot{ -1 };
-std::atomic<int> g_lastDropHookWeaponDef{ -1 };
-std::atomic<bool> g_lastDropHookWasRecording{ false };
-std::atomic<void*> g_lastDropHookPawn{ nullptr };
-std::atomic<void*> g_lastDropHookTarget{ nullptr };
-std::atomic<void*> g_lastDropHookVelocity{ nullptr };
-std::atomic<int> g_lastDropReplaySlot{ -1 };
-std::atomic<int> g_lastDropReplayWeaponDef{ -1 };
-std::atomic<uint32_t> g_lastDropReplayVectorFlags{ ReplayDropVectorNone };
 hooks::NativeHook<DropWeaponResult, void*, void*, void*, void*> g_hookDropWeapon;
 struct DropFrame
 {
@@ -116,7 +95,6 @@ thread_local std::vector<DropFrame> g_dropFrames;
 void* g_addrDropWeapon = nullptr;
 std::atomic<bool> g_dropHookTried{ false };
 std::atomic<bool> g_dropHookReady{ false };
-thread_local int g_activeReplayDropSlot = -1;
 thread_local const ReplayDropEvent* g_activeReplayDropEvent = nullptr;
 constexpr int kMolotovDef = 46;
 constexpr int kIncendiaryDef = 48;
@@ -153,16 +131,6 @@ int RecordingSlotForWeaponServices(void* weaponServices, void* pawn)
     return IsRecording(slot) ? slot : -1;
 }
 
-// Resolves the replay slot that currently owns this weapon-services pointer
-int ReplaySlotForWeaponServices(void* weaponServices)
-{
-    for (int slot = 0; slot < kMaxSlots; ++slot)
-    {
-        if (IsReplaying(slot) && weapon_locker_hooks::WsForSlot(slot) == weaponServices) return slot;
-    }
-    return -1;
-}
-
 // Stores one real weapon-service drop in the pending recording tick
 bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
 {
@@ -173,22 +141,15 @@ bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
     std::scoped_lock lk(r.mu);
     r.pendingEventFlags |= ReplayEventDrop;
     r.pendingDropEvent = event;
-    g_dropCaptureCount.fetch_add(1, std::memory_order_relaxed);
-    g_lastDropCaptureSlot.store(slot, std::memory_order_relaxed);
-    g_lastDropCaptureVectorFlags.store(event.vectorFlags, std::memory_order_relaxed);
     return true;
 }
 
 // Captures drop inputs and recalls the remaining hooks when replay changes vectors.
 KHook::Return<DropWeaponResult> HookedDropWeapon(void* weaponServices, void* weapon, void* target, void* velocity) noexcept
 {
-    g_dropHookCallCount.fetch_add(1, std::memory_order_relaxed);
-
     void* pawn = nullptr;
     if (weaponServices) GuardedRead(weaponServices, tg::g_servicesPawn, pawn);
     const int recordingSlot = RecordingSlotForWeaponServices(weaponServices, pawn);
-    const int replaySlot = ValidSlot(g_activeReplayDropSlot) ? g_activeReplayDropSlot : ReplaySlotForWeaponServices(weaponServices);
-    const int slot = ValidSlot(recordingSlot) ? recordingSlot : replaySlot;
     int weaponDefIndex = weapon_locker_hooks::ReadDefIndex(weapon);
     if (weaponDefIndex < 0 && weaponServices) weaponDefIndex = weapon_locker_hooks::ActiveWeaponDef(weaponServices);
     if (weaponDefIndex < 0 && ValidSlot(recordingSlot)) weaponDefIndex = g_rec[recordingSlot].currentDef.load(std::memory_order_relaxed);
@@ -204,8 +165,6 @@ KHook::Return<DropWeaponResult> HookedDropWeapon(void* weaponServices, void* wea
     void* effectiveVelocity = velocity;
     if (g_activeReplayDropEvent)
     {
-        if (g_activeReplayDropEvent->vectorFlags != ReplayDropVectorNone)
-            g_dropReplayVectorOverrideCount.fetch_add(1, std::memory_order_relaxed);
         if ((g_activeReplayDropEvent->vectorFlags & ReplayDropVectorTarget) != 0)
         {
             for (int i = 0; i < 3; ++i)
@@ -219,20 +178,6 @@ KHook::Return<DropWeaponResult> HookedDropWeapon(void* weaponServices, void* wea
             effectiveVelocity = replayVelocity;
         }
     }
-
-    if (ValidSlot(recordingSlot))
-    {
-        g_dropHookRecordingCallCount.fetch_add(1, std::memory_order_relaxed);
-        if (weaponDefIndex < 0) g_dropHookInvalidDefCount.fetch_add(1, std::memory_order_relaxed);
-    }
-    if (ValidSlot(g_activeReplayDropSlot)) g_dropReplayHookCallCount.fetch_add(1, std::memory_order_relaxed);
-
-    g_lastDropHookPawn.store(pawn, std::memory_order_relaxed);
-    g_lastDropHookSlot.store(slot, std::memory_order_relaxed);
-    g_lastDropHookWeaponDef.store(weaponDefIndex, std::memory_order_relaxed);
-    g_lastDropHookWasRecording.store(ValidSlot(recordingSlot), std::memory_order_relaxed);
-    g_lastDropHookTarget.store(effectiveTarget, std::memory_order_relaxed);
-    g_lastDropHookVelocity.store(effectiveVelocity, std::memory_order_relaxed);
 
     g_dropFrames.push_back({ weaponServices, weapon, recordingSlot, weaponDefIndex, recordedEvent });
     if (effectiveTarget != target || effectiveVelocity != velocity)
@@ -250,7 +195,6 @@ KHook::Return<DropWeaponResult> DropWeaponPost(void*, void*, void*, void*) noexc
         weaponServices && weapon && weaponDefIndex >= 0 && weapon_locker_hooks::FindWeaponByDef(weaponServices, weaponDefIndex) != weapon;
     if (detached && ValidSlot(recordingSlot))
     {
-        g_dropHookPhysicalDropCount.fetch_add(1, std::memory_order_relaxed);
         CaptureDropEvent(recordingSlot, recordedEvent);
     }
     else if (ValidSlot(recordingSlot) && weapon && weaponDefIndex >= 0)
@@ -269,7 +213,6 @@ KHook::Return<DropWeaponResult> DropWeaponPost(void*, void*, void*, void*) noexc
         }
         if (!found) r.pendingDropCandidates.push_back({ .weapon = weapon, .event = recordedEvent });
     }
-    if (detached && ValidSlot(g_activeReplayDropSlot)) g_dropReplayDetachedCount.fetch_add(1, std::memory_order_relaxed);
     return { KHook::Action::Ignore };
 }
 
@@ -493,10 +436,6 @@ void OnCapturePost(int slot, void* services, void* cmd)
             {
                 r.pendingEventFlags |= ReplayEventDrop;
                 r.pendingDropEvent = candidate.event;
-                g_dropHookPhysicalDropCount.fetch_add(1, std::memory_order_relaxed);
-                g_dropCaptureCount.fetch_add(1, std::memory_order_relaxed);
-                g_lastDropCaptureSlot.store(slot, std::memory_order_relaxed);
-                g_lastDropCaptureVectorFlags.store(candidate.event.vectorFlags, std::memory_order_relaxed);
                 r.pendingDropCandidates.erase(r.pendingDropCandidates.begin() + static_cast<std::ptrdiff_t>(i));
                 continue;
             }
@@ -940,11 +879,6 @@ bool DropReplayEventWeapon(int slot, void* services, const ReplayDropEvent& even
     const int weaponDefIndex = event.weaponDefIndex;
     if (!ValidSlot(slot) || !services || weaponDefIndex < 0 || !IsReplaying(slot) || !weapon_locker_hooks::WeaponHooksReady()) return false;
 
-    g_dropReplayAttemptCount.fetch_add(1, std::memory_order_relaxed);
-    g_lastDropReplaySlot.store(slot, std::memory_order_relaxed);
-    g_lastDropReplayWeaponDef.store(weaponDefIndex, std::memory_order_relaxed);
-    g_lastDropReplayVectorFlags.store(event.vectorFlags, std::memory_order_relaxed);
-
     void* pawn = input_injector::ResolveReplayPawn(slot, services);
     void* ws = nullptr;
     if (!pawn || !GuardedRead(pawn, tg::g_pawnWeaponServices, ws) || !ws) return false;
@@ -957,83 +891,14 @@ bool DropReplayEventWeapon(int slot, void* services, const ReplayDropEvent& even
     CCommand command;
     if (!command.Tokenize("drop")) return false;
 
-    g_activeReplayDropSlot = slot;
     g_activeReplayDropEvent = &event;
     dispatch::g_gameClients->ClientCommand(CPlayerSlot(slot), command);
     g_activeReplayDropEvent = nullptr;
-    g_activeReplayDropSlot = -1;
-    g_dropReplayNativeCallCount.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
-// Returns how many player drop commands were recorded
-uint64_t DropCaptureCount() { return g_dropCaptureCount.load(std::memory_order_relaxed); }
-
-// Returns how many real weapon-service drops reached the native hook
-uint64_t DropHookCallCount() { return g_dropHookCallCount.load(std::memory_order_relaxed); }
-
-// Returns how many native drop calls belonged to an active recording slot
-uint64_t DropHookRecordingCallCount() { return g_dropHookRecordingCallCount.load(std::memory_order_relaxed); }
-
-// Returns how many recording calls actually detached their supplied weapon
-uint64_t DropHookPhysicalDropCount() { return g_dropHookPhysicalDropCount.load(std::memory_order_relaxed); }
-
-// Returns how many recording drop calls had no resolvable item definition
-uint64_t DropHookInvalidDefCount() { return g_dropHookInvalidDefCount.load(std::memory_order_relaxed); }
-
-// Returns how many recorded drop events reached replay execution
-uint64_t DropReplayAttemptCount() { return g_dropReplayAttemptCount.load(std::memory_order_relaxed); }
-
-// Returns how many replay drop calls re-entered the confirmed native hook
-uint64_t DropReplayHookCallCount() { return g_dropReplayHookCallCount.load(std::memory_order_relaxed); }
-
-// Returns how many replay calls applied at least one recorded drop vector
-uint64_t DropReplayVectorOverrideCount() { return g_dropReplayVectorOverrideCount.load(std::memory_order_relaxed); }
-
-// Returns how many replay calls actually detached their supplied weapon
-uint64_t DropReplayDetachedCount() { return g_dropReplayDetachedCount.load(std::memory_order_relaxed); }
-
-// Returns how many native drop calls were issued
-uint64_t DropReplayNativeCallCount() { return g_dropReplayNativeCallCount.load(std::memory_order_relaxed); }
-
 // Reports whether the native weapon-service drop hook is installed
 bool DropHookReady() { return g_dropHookReady.load(std::memory_order_acquire); }
-
-// Returns the address resolved from the live weapon-services vtable
-void* DropHookAddress() { return g_addrDropWeapon; }
-
-// Returns the last player slot whose drop command was captured
-int LastDropCaptureSlot() { return g_lastDropCaptureSlot.load(std::memory_order_relaxed); }
-
-// Returns which drop vectors were saved for the latest captured event
-uint32_t LastDropCaptureVectorFlags() { return g_lastDropCaptureVectorFlags.load(std::memory_order_relaxed); }
-
-// Returns the recording slot resolved for the latest native drop call
-int LastDropHookSlot() { return g_lastDropHookSlot.load(std::memory_order_relaxed); }
-
-// Returns the item definition read from the latest native drop call
-int LastDropHookWeaponDef() { return g_lastDropHookWeaponDef.load(std::memory_order_relaxed); }
-
-// Reports whether the latest native drop call belonged to an active recorder
-bool LastDropHookWasRecording() { return g_lastDropHookWasRecording.load(std::memory_order_relaxed); }
-
-// Returns the pawn read from the latest native drop caller
-void* LastDropHookPawn() { return g_lastDropHookPawn.load(std::memory_order_relaxed); }
-
-// Returns the optional target pointer from the latest native drop call
-void* LastDropHookTarget() { return g_lastDropHookTarget.load(std::memory_order_relaxed); }
-
-// Returns the optional velocity pointer from the latest native drop call
-void* LastDropHookVelocity() { return g_lastDropHookVelocity.load(std::memory_order_relaxed); }
-
-// Returns the last bot slot that attempted a replay drop
-int LastDropReplaySlot() { return g_lastDropReplaySlot.load(std::memory_order_relaxed); }
-
-// Returns the last recorded item definition used by replay drop
-int LastDropReplayWeaponDef() { return g_lastDropReplayWeaponDef.load(std::memory_order_relaxed); }
-
-// Returns which recorded drop vectors were supplied to the latest replay call
-uint32_t LastDropReplayVectorFlags() { return g_lastDropReplayVectorFlags.load(std::memory_order_relaxed); }
 
 // Write replay velocity onto the pawn. View replay is driven by SetEyeAngles.
 namespace {

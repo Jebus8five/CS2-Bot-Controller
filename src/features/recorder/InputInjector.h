@@ -21,9 +21,6 @@ void Remove();
 
 const char* Status();
 
-// Resolved address of the hooked function.
-void* ProcessUsercmdAddress();
-
 // Registers the authoritative replay pawn supplied by the managed plugin.
 bool SetReplayPawn(int slot, void* pawn);
 
@@ -60,26 +57,5 @@ bool CancelUsercmdSuppression(int slot, int64_t suppressionId);
 // Clears every pending and active usercmd injection for one slot
 void ClearUsercmdInjections(int slot);
 
-// Diagnostics
-uint64_t HookCallCount();
-int LastResolvedSlot();
-uint64_t FinishMoveCallCount();
-uint64_t PlayerRunCommandCallCount();
-uint64_t UsercmdMovementApplyCount();
-int LastUsercmdMovementSlot();
-int LastUsercmdForwardMove();
-int LastUsercmdLeftMove();
-uint64_t PhysicsSimulateCallCount();
-int LastPhysicsSlot();
-uint64_t ReplayCommitCount();
-uint64_t SlotResolveCallCount();
-uint64_t SlotResolveFailureCount();
-uintptr_t LastServices();
-uintptr_t LastPawn();
-uint32_t LastControllerHandle();
-uint32_t LastOriginalControllerHandle();
-int LastControllerIndex();
-int LastOriginalControllerIndex();
-int LastOwnerSlot();
 } // namespace input_injector
 } // namespace cs2bc
