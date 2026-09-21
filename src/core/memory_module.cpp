@@ -21,21 +21,10 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string>
 
 namespace cs2bc::modules {
 namespace {
-const char* BaseName(const char* path)
-{
-    if (!path) return "";
-    const char* slash = std::strrchr(path, '/');
-    const char* backslash = std::strrchr(path, '\\');
-    const char* base = slash;
-    if (backslash && (!base || backslash > base)) base = backslash;
-    return base ? base + 1 : path;
-}
-
 #ifdef _WIN32
 ModuleInfo ModuleFromHandle(HMODULE handle)
 {
@@ -51,14 +40,6 @@ ModuleInfo ModuleFromHandle(HMODULE handle)
     return out;
 }
 #else
-bool NameMatches(const char* loadedPath, const char* moduleName)
-{
-    if (!loadedPath || !loadedPath[0] || !moduleName || !moduleName[0]) return false;
-    const char* loadedBase = BaseName(loadedPath);
-    const char* wantBase = BaseName(moduleName);
-    return std::strcmp(loadedBase, wantBase) == 0;
-}
-
 void FillModuleFromPhdr(dl_phdr_info* info, ModuleInfo& out)
 {
     uintptr_t minAddr = UINTPTR_MAX;
@@ -85,21 +66,6 @@ void FillModuleFromPhdr(dl_phdr_info* info, ModuleInfo& out)
         out.base = reinterpret_cast<unsigned char*>(minAddr);
         out.size = static_cast<size_t>(maxAddr - minAddr);
     }
-}
-
-struct FindByNameCtx
-{
-    const char* Name = nullptr;
-    ModuleInfo Result;
-};
-
-int FindByNameCallback(dl_phdr_info* info, size_t, void* data)
-{
-    auto* ctx = static_cast<FindByNameCtx*>(data);
-    if (!NameMatches(info->dlpi_name, ctx->Name)) return 0;
-
-    FillModuleFromPhdr(info, ctx->Result);
-    return ctx->Result ? 1 : 0;
 }
 
 struct FindByAddressCtx
@@ -183,18 +149,6 @@ void* FindPatternIn(const ModuleInfo& module, const std::vector<uint8_t>& patter
         }
     }
     return nullptr;
-}
-
-ModuleInfo ModuleFromName(const char* moduleName)
-{
-#ifdef _WIN32
-    return ModuleFromHandle(GetModuleHandleA(moduleName));
-#else
-    FindByNameCtx ctx{};
-    ctx.Name = moduleName;
-    dl_iterate_phdr(FindByNameCallback, &ctx);
-    return ctx.Result;
-#endif
 }
 
 ModuleInfo ModuleFromInterfacePtr(void* interfacePtr)
