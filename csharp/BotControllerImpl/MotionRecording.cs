@@ -1,6 +1,7 @@
 // Recording model and JSON load/save
 
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 using BotControllerApi;
 
@@ -9,10 +10,10 @@ namespace BotControllerImpl;
 // Recorded motion plus the tickrate it was captured at
 public sealed class MotionRecording
 {
-    public int Tickrate { get; set; } = 64;
-    public ReplayTick[] Ticks { get; set; } = Array.Empty<ReplayTick>();
-    public SubtickMove[] Subticks { get; set; } = Array.Empty<SubtickMove>();
-    public ReplayCommandFrame[] Commands { get; set; } = Array.Empty<ReplayCommandFrame>();
+    public required int Tickrate { get; set; }
+    public required ReplayTick[] Ticks { get; set; }
+    public required SubtickMove[] Subticks { get; set; }
+    public required ReplayCommandFrame[] Commands { get; set; }
 }
 
 // File + capture-buffer on top of the native calls
@@ -23,6 +24,7 @@ public static class MotionStore
     {
         WriteIndented = false,
         IncludeFields = true,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
     // Save a slot's recorded motion to a JSON file. Returns tick count, or -1
@@ -44,6 +46,22 @@ public static class MotionStore
 
     // Load a JSON recording from disk
     public static MotionRecording LoadFromFile(string path)
-        => JsonSerializer.Deserialize<MotionRecording>(File.ReadAllText(path), JsonOpts)
-           ?? new MotionRecording();
+    {
+        MotionRecording recording = JsonSerializer.Deserialize<MotionRecording>(
+            File.ReadAllText(path), JsonOpts)
+            ?? throw new InvalidDataException("Recording JSON is empty.");
+        if (recording.Ticks is null || recording.Subticks is null || recording.Commands is null)
+            throw new InvalidDataException("Recording JSON is missing required data.");
+        if (recording.Commands.Length != recording.Ticks.Length)
+            throw new InvalidDataException("Recording commands must match the tick count.");
+
+        const uint commandFieldWeaponSelectDef = 1U << 8;
+        foreach (ReplayCommandFrame command in recording.Commands)
+        {
+            if ((command.Fields & commandFieldWeaponSelectDef) == 0)
+                throw new InvalidDataException("Recording uses an unsupported command JSON format.");
+        }
+
+        return recording;
+    }
 }

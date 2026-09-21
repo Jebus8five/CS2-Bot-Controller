@@ -512,22 +512,16 @@ int CopyCommands(int slot, ReplayCommandFrameData* out, int maxCommands)
 
 // ---- replay ----
 
-// Load legacy buffers by supplying empty extended buffers
-bool LoadReplay(int slot, const ReplayTick* ticks, int tickCount, const SubtickMove* subs, int subCount) noexcept
-{
-    return LoadReplayExtended(slot, ticks, tickCount, subs, subCount, nullptr, 0, nullptr, 0);
-}
-
 // Validate, stage, and atomically replace all replay buffers
-bool LoadReplayExtended(int slot,
-                        const ReplayTick* ticks,
-                        int tickCount,
-                        const SubtickMove* subs,
-                        int subCount,
-                        const ReplayCommandFrameData* commands,
-                        int commandCount,
-                        const ReplayMovementExtra* movementExtras,
-                        int movementExtraCount) noexcept
+bool LoadReplay(int slot,
+                const ReplayTick* ticks,
+                int tickCount,
+                const SubtickMove* subs,
+                int subCount,
+                const ReplayCommandFrameData* commands,
+                int commandCount,
+                const ReplayMovementExtra* movementExtras,
+                int movementExtraCount) noexcept
 {
     try
     {
@@ -730,24 +724,16 @@ bool ReplayCommandFrameForSimulation(int slot, ReplayCommandFrame& out)
             out.subticks[i] = p.subs[static_cast<size_t>(begin) + static_cast<size_t>(i)];
     }
 
-    if ((out.commandFields & kCommandFieldWeaponSelectDef) != 0)
+    // Replay requests, not post-simulation observations. A grenade can defer a
+    // switch, and reselecting the same item is still a meaningful request.
+    if (out.rawWeaponSelect > 0)
     {
-        // Replay requests, not post-simulation observations. A grenade can defer a
-        // switch, and reselecting the same item is still a meaningful request.
-        if (out.rawWeaponSelect > 0)
-        {
-            void* weapon = FindReplayWeaponByDef(weapon_locker_hooks::WsForSlot(slot), out.rawWeaponSelect);
-            if (weapon) out.weaponSelect = weapon_locker_hooks::WeaponEntIndex(weapon);
-        }
-        else if (p.needsInitialTeleport.load(std::memory_order_acquire) || recordedWeaponChanged)
-        {
-            // Preserve selections issued through client commands rather than UserCmd.
-            out.weaponSelect = ReplayWeaponSelectForDef(slot, recordedDef);
-        }
+        void* weapon = FindReplayWeaponByDef(weapon_locker_hooks::WsForSlot(slot), out.rawWeaponSelect);
+        if (weapon) out.weaponSelect = weapon_locker_hooks::WeaponEntIndex(weapon);
     }
-    else
+    else if (p.needsInitialTeleport.load(std::memory_order_acquire) || recordedWeaponChanged)
     {
-        // Legacy recordings do not identify the requested weapon independently.
+        // Preserve selections issued through client commands rather than UserCmd.
         out.weaponSelect = ReplayWeaponSelectForDef(slot, recordedDef);
     }
     return true;

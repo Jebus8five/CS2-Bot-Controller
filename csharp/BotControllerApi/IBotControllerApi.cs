@@ -41,11 +41,8 @@ namespace BotControllerApi
 
         // ---- replay ----
 
-        // Load ticks + subticks into a slot's replay buffer.
-        bool LoadReplay(int slot, ReplayTick[] ticks, SubtickMove[] subs);
-
-        // Load ticks, subticks, and aligned command frames into a replay buffer
-        bool LoadReplayExtended(
+        // Load ticks, subticks, and aligned command frames into a replay buffer.
+        bool LoadReplay(
             int slot,
             ReplayTick[] ticks,
             SubtickMove[] subs,

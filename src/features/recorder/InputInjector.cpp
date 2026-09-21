@@ -594,19 +594,15 @@ void ApplyReplayUserCommand(int slot, void* services, PlayerCommand* pc, CBaseUs
             base->set_mousedy(frame.mouseDy);
         }
         if ((frame.commandFields & motion_recorder::kCommandFieldLeftHand) != 0) pc->set_left_hand_desired(frame.leftHandDesired != 0);
-        if ((frame.commandFields & motion_recorder::kCommandFieldWeaponSelectDef) != 0)
+        if ((frame.commandFields & motion_recorder::kCommandFieldForwardMove) == 0) base->clear_forwardmove();
+        if ((frame.commandFields & motion_recorder::kCommandFieldLeftMove) == 0) base->clear_leftmove();
+        if ((frame.commandFields & motion_recorder::kCommandFieldUpMove) == 0) base->clear_upmove();
+        if ((frame.commandFields & motion_recorder::kCommandFieldMouse) == 0)
         {
-            // Absent recorded fields mean protobuf defaults, not leftover bot input.
-            if ((frame.commandFields & motion_recorder::kCommandFieldForwardMove) == 0) base->clear_forwardmove();
-            if ((frame.commandFields & motion_recorder::kCommandFieldLeftMove) == 0) base->clear_leftmove();
-            if ((frame.commandFields & motion_recorder::kCommandFieldUpMove) == 0) base->clear_upmove();
-            if ((frame.commandFields & motion_recorder::kCommandFieldMouse) == 0)
-            {
-                base->clear_mousedx();
-                base->clear_mousedy();
-            }
-            if ((frame.commandFields & motion_recorder::kCommandFieldLeftHand) == 0) pc->clear_left_hand_desired();
+            base->clear_mousedx();
+            base->clear_mousedy();
         }
+        if ((frame.commandFields & motion_recorder::kCommandFieldLeftHand) == 0) pc->clear_left_hand_desired();
         if (frame.weaponSelect >= 0) base->set_weaponselect(frame.weaponSelect);
         else
             base->clear_weaponselect();

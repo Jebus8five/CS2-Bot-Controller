@@ -96,7 +96,7 @@ namespace BotControllerApi
             int slot, [Out] ReplayCommandFrame[] commands, int maxCommands);
 
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int BotController_LoadReplayExtended(
+        private static extern int BotController_LoadReplay(
             int slot, [In] ReplayTick[] ticks, int tickCount,
             [In] SubtickMove[] subs, int subCount,
             [In] ReplayCommandFrame[] commands, int commandCount,
@@ -299,22 +299,15 @@ namespace BotControllerApi
 
         // ---- replay ----
 
-        // Load ticks + subticks into a slot's replay buffer (native copies in).
-        public static bool LoadReplay(int slot, ReplayTick[] ticks, SubtickMove[] subs)
-            => LoadReplayExtended(
-                slot, ticks, subs,
-                Array.Empty<ReplayCommandFrame>(),
-                Array.Empty<ReplayMovementExtra>());
-
-        // Load replay buffers with optional per-tick command and movement data
-        public static bool LoadReplayExtended(
+        // Load replay buffers with optional per-tick command and movement data.
+        public static bool LoadReplay(
             int slot,
             ReplayTick[] ticks,
             SubtickMove[] subs,
             ReplayCommandFrame[] commands,
             ReplayMovementExtra[] movementExtras)
             => ticks is { Length: > 0 }
-               && BotController_LoadReplayExtended(
+               && BotController_LoadReplay(
                    slot,
                    ticks,
                    ticks.Length,

@@ -215,26 +215,19 @@ extern "C" BC_EXPORT int BotController_CopyRecordedCommands(int slot, cs2bc::Rep
     return cs2bc::motion_recorder::CopyCommands(slot, out, maxCommands);
 }
 
-// Load parallel tick + subtick arrays into a slot's replay buffer. 0 ok.
-extern "C" BC_EXPORT int
-BotController_LoadReplay(int slot, const cs2bc::ReplayTick* ticks, int tickCount, const cs2bc::SubtickMove* subs, int subCount) noexcept
+// Load replay buffers with optional per-tick command and movement data. 0 ok.
+extern "C" BC_EXPORT int BotController_LoadReplay(int slot,
+                                                  const cs2bc::ReplayTick* ticks,
+                                                  int tickCount,
+                                                  const cs2bc::SubtickMove* subs,
+                                                  int subCount,
+                                                  const cs2bc::ReplayCommandFrameData* commands,
+                                                  int commandCount,
+                                                  const cs2bc::ReplayMovementExtra* movementExtras,
+                                                  int movementExtraCount) noexcept
 {
-    return cs2bc::motion_recorder::LoadReplay(slot, ticks, tickCount, subs, subCount) ? 0 : -1;
-}
-
-// Load replay buffers with optional per-tick command and movement data
-extern "C" BC_EXPORT int BotController_LoadReplayExtended(int slot,
-                                                          const cs2bc::ReplayTick* ticks,
-                                                          int tickCount,
-                                                          const cs2bc::SubtickMove* subs,
-                                                          int subCount,
-                                                          const cs2bc::ReplayCommandFrameData* commands,
-                                                          int commandCount,
-                                                          const cs2bc::ReplayMovementExtra* movementExtras,
-                                                          int movementExtraCount) noexcept
-{
-    return cs2bc::motion_recorder::LoadReplayExtended(slot, ticks, tickCount, subs, subCount, commands, commandCount, movementExtras,
-                                                      movementExtraCount)
+    return cs2bc::motion_recorder::LoadReplay(slot, ticks, tickCount, subs, subCount, commands, commandCount, movementExtras,
+                                              movementExtraCount)
                ? 0
                : -1;
 }
@@ -255,9 +248,7 @@ extern "C" BC_EXPORT int BotController_TransferRecordingToReplay(int srcSlot, in
     int gotS = ns > 0 ? cs2bc::motion_recorder::CopySubticks(srcSlot, subs.data(), ns) : 0;
     int gotC = cs2bc::motion_recorder::CopyCommands(srcSlot, commands.data(), nc);
     if (gotT <= 0 || gotC != gotT) return -1;
-    return cs2bc::motion_recorder::LoadReplayExtended(dstSlot, ticks.data(), gotT, subs.data(), gotS, commands.data(), gotC, nullptr, 0)
-               ? 0
-               : -1;
+    return cs2bc::motion_recorder::LoadReplay(dstSlot, ticks.data(), gotT, subs.data(), gotS, commands.data(), gotC, nullptr, 0) ? 0 : -1;
 }
 
 extern "C" BC_EXPORT int BotController_StartReplay(int slot, int loop)

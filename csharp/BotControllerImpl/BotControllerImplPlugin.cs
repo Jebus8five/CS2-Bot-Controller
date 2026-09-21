@@ -165,11 +165,11 @@ public partial class BotControllerPlugin : BasePlugin
         if (rec.Tickrate != Tickrate)
             cmd.ReplyToCommand($"[BotController] WARN tickrate mismatch: recorded {rec.Tickrate}, server {Tickrate}.");
 
-        if (BotController.LoadReplayExtended(
+        if (BotController.LoadReplay(
                 botSlot,
                 rec.Ticks,
                 rec.Subticks,
-                rec.Commands ?? Array.Empty<ReplayCommandFrame>(),
+                rec.Commands,
                 Array.Empty<ReplayMovementExtra>()) &&
             RegisterReplayPawnForSlot(botSlot) &&
             BotController.StartReplay(botSlot))

@@ -81,7 +81,6 @@ struct SubtickMove
     float yawDelta; // yaw_delta
 };
 
-// Optional command data captured for one replay tick
 struct ReplayCommandFrameData
 {
     float forwardMove;
@@ -95,13 +94,12 @@ struct ReplayCommandFrameData
     uint64_t buttons2;
     int32_t mouseDx;
     int32_t mouseDy;
-    int32_t weaponSelect; // item def for WeaponSelectDef frames; entity index in legacy frames
+    int32_t weaponSelect;
     uint32_t fields;
     uint8_t leftHandDesired;
     uint8_t pad[3];
 };
 
-// Optional movement-service state captured for one replay tick
 struct ReplayMovementExtra
 {
     uint32_t fields;
@@ -134,7 +132,6 @@ constexpr uint32_t kCommandFieldButtons = 1U << 4;
 constexpr uint32_t kCommandFieldMouse = 1U << 5;
 constexpr uint32_t kCommandFieldWeaponSelect = 1U << 6;
 constexpr uint32_t kCommandFieldLeftHand = 1U << 7;
-// Marks all new frames, including frames without a weapon-selection request.
 constexpr uint32_t kCommandFieldWeaponSelectDef = 1U << 8;
 
 // Complete replay input frame assembled for PlayerRunCommand
@@ -172,7 +169,7 @@ int RecordedCommandCount(int slot); // <0 on bad slot
 void OnCapturePre(int slot, void* services, void* cmd);
 // PhysicsSimulate hook: capture post snapshot + commit the tick
 void OnCapturePost(int slot, void* services, void* cmd);
-// PlayerRunCommand hook: stash this tick's subtick moves (pending).
+// PlayerRunCommand hook: stash this tick's subtick moves
 void OnCaptureSubticks(int slot, const SubtickMove* moves, int count);
 // PlayerRunCommand hook: stash this tick's complete command frame
 void OnCaptureCommand(int slot, const ReplayCommandFrameData& command);
@@ -188,18 +185,16 @@ int CopySubticks(int slot, SubtickMove* out, int maxSubticks);
 int CopyCommands(int slot, ReplayCommandFrameData* out, int maxCommands);
 
 // ---- replay ----
-// Load legacy replay arrays through the extended loader
-bool LoadReplay(int slot, const ReplayTick* ticks, int tickCount, const SubtickMove* subs, int subCount) noexcept;
 // Load all parallel replay arrays into a slot's replay buffer
-bool LoadReplayExtended(int slot,
-                        const ReplayTick* ticks,
-                        int tickCount,
-                        const SubtickMove* subs,
-                        int subCount,
-                        const ReplayCommandFrameData* commands,
-                        int commandCount,
-                        const ReplayMovementExtra* movementExtras,
-                        int movementExtraCount) noexcept;
+bool LoadReplay(int slot,
+                const ReplayTick* ticks,
+                int tickCount,
+                const SubtickMove* subs,
+                int subCount,
+                const ReplayCommandFrameData* commands,
+                int commandCount,
+                const ReplayMovementExtra* movementExtras,
+                int movementExtraCount) noexcept;
 bool StartReplay(int slot, bool loop); // play from tick 0
 bool StopReplay(int slot); // stop + clear injection
 bool IsReplaying(int slot);
@@ -224,9 +219,7 @@ bool CurrentReplayInputButtons(int slot, uint64_t& b0, uint64_t& b1, uint64_t& b
 // Switch a bot to the weapon with this def index.
 bool SwitchBotWeaponByDef(int slot, int defIndex);
 
-// Def index of the weapon the bot currently holds (live engine read),
-// same normalization as recorded WeaponDefIndex (knife -> kKnifeDef).
-// -1 if no ws / no active weapon. For C# to reconcile replay weapon.
+// Def index of the weapon the bot currently holds.
 int BotActiveWeaponDef(int slot);
 
 // Treats CT and T fire grenades as the same replay weapon type
@@ -249,6 +242,6 @@ void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick);
 // PhysicsSimulate (post): restore the end snapshot and advance the cursor.
 void OnReplayCommit(int slot, void* services, bool simulated);
 
-void ClearAll(); // wipe all record + replay buffers (on unload)
+void ClearAll(); // wipe all record + replay buffers
 } // namespace motion_recorder
 } // namespace cs2bc

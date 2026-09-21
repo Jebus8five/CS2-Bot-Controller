@@ -26,15 +26,12 @@ namespace BotControllerApi
             => BotController.GetRecordedMotionExtended(slot);
 
         // ---- replay ----
-        public bool LoadReplay(int slot, ReplayTick[] ticks, SubtickMove[] subs)
-            => BotController.LoadReplay(slot, ticks, subs);
-        // Loads aligned command frames without movement-extra data
-        public bool LoadReplayExtended(
+        public bool LoadReplay(
             int slot,
             ReplayTick[] ticks,
             SubtickMove[] subs,
             ReplayCommandFrame[] commands)
-            => BotController.LoadReplayExtended(
+            => BotController.LoadReplay(
                 slot, ticks, subs, commands, Array.Empty<ReplayMovementExtra>());
         public bool TransferRecordingToReplay(int srcSlot, int dstSlot)
             => BotController.TransferRecordingToReplay(srcSlot, dstSlot);

@@ -72,15 +72,12 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
             => BotController.GetRecordedMotionExtended(slot);
 
         // Loads a replay buffer into a bot slot.
-        public bool LoadReplay(int slot, ReplayTick[] ticks, SubtickMove[] subs)
-            => BotController.LoadReplay(slot, ticks, subs);
-        // Loads aligned command frames without movement-extra data
-        public bool LoadReplayExtended(
+        public bool LoadReplay(
             int slot,
             ReplayTick[] ticks,
             SubtickMove[] subs,
             ReplayCommandFrame[] commands)
-            => BotController.LoadReplayExtended(
+            => BotController.LoadReplay(
                 slot, ticks, subs, commands, Array.Empty<ReplayMovementExtra>());
         // Moves a recorded buffer directly into another slot's replay buffer.
         public bool TransferRecordingToReplay(int srcSlot, int dstSlot)
@@ -374,11 +371,11 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
         if (rec.Tickrate != Tickrate)
             context.Reply(Tag($"WARN tickrate mismatch: recorded {rec.Tickrate}, server {Tickrate}."));
 
-        if (BotController.LoadReplayExtended(
+        if (BotController.LoadReplay(
                 botSlot,
                 rec.Ticks,
                 rec.Subticks,
-                rec.Commands ?? Array.Empty<ReplayCommandFrame>(),
+                rec.Commands,
                 Array.Empty<ReplayMovementExtra>()) &&
             RegisterReplayPawnForSlot(botSlot) &&
             BotController.StartReplay(botSlot))
