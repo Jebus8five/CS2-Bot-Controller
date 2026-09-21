@@ -27,9 +27,6 @@ namespace tg = cs2bc::offsets;
 
 namespace cs2bc {
 namespace motion_recorder {
-// Both platform overrides ignore argument three and consume the optional velocity.
-using DropWeaponT = void(BC_FASTCALL*)(void* weaponServices, void* weapon, void* unused, const float* velocity);
-
 struct RecordState
 {
     struct DropCandidate
@@ -93,12 +90,13 @@ thread_local std::vector<DropFrame> g_dropFrames;
 void* g_addrDropWeapon = nullptr;
 std::atomic<bool> g_dropHookTried{ false };
 std::atomic<bool> g_dropHookReady{ false };
-thread_local const ReplayDropEvent* g_activeReplayDropEvent = nullptr;
 constexpr int kMolotovDef = 46;
 constexpr int kIncendiaryDef = 48;
 
 bool ValidSlot(int s) { return s >= 0 && s < kMaxSlots; }
 static int ReplayWeaponSelectForDef(int slot, int recordedDef);
+// Publishes the frame's pawn state before the native drop command reads it.
+bool PrepareReplayDropPawn(int slot, void* services);
 
 // Returns whether an item definition is either faction's fire grenade
 bool IsFireGrenadeDef(int defIndex) { return defIndex == kMolotovDef || defIndex == kIncendiaryDef; }
@@ -112,9 +110,6 @@ void* FindReplayWeaponByDef(void* ws, int recordedDef)
     const int alternateDef = recordedDef == kMolotovDef ? kIncendiaryDef : kMolotovDef;
     return weapon_locker_hooks::FindWeaponByDef(ws, alternateDef);
 }
-
-// Copies an optional engine Vector into stable recording storage
-bool ReadDropVector(const float* vector, float out[3]) { return vector && TryReadMemory(vector, 0, out, sizeof(float) * 3); }
 
 // Prefers the recorder's exact cached weapon-services owner over controller handles
 int RecordingSlotForWeaponServices(void* weaponServices, void* pawn)
@@ -142,8 +137,8 @@ bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
     return true;
 }
 
-// Captures drop velocity; the unused third argument is forwarded without dereferencing it.
-KHook::Return<void> HookedDropWeapon(void* weaponServices, void* weapon, void* unused, const float* velocity) noexcept
+// Records the drop event and item; all native arguments remain untouched.
+KHook::Return<void> HookedDropWeapon(void* weaponServices, void* weapon, void*, const float*) noexcept
 {
     void* pawn = nullptr;
     if (weaponServices) GuardedRead(weaponServices, tg::g_servicesPawn, pawn);
@@ -154,24 +149,7 @@ KHook::Return<void> HookedDropWeapon(void* weaponServices, void* weapon, void* u
 
     ReplayDropEvent recordedEvent{};
     recordedEvent.weaponDefIndex = weaponDefIndex;
-    if (ReadDropVector(velocity, recordedEvent.velocity)) recordedEvent.vectorFlags |= ReplayDropVectorVelocity;
-
-    float replayVelocity[3] = {};
-    const float* effectiveVelocity = velocity;
-    if (g_activeReplayDropEvent)
-    {
-        if ((g_activeReplayDropEvent->vectorFlags & ReplayDropVectorVelocity) != 0)
-        {
-            for (int i = 0; i < 3; ++i)
-                replayVelocity[i] = g_activeReplayDropEvent->velocity[i];
-            effectiveVelocity = replayVelocity;
-        }
-    }
-
     g_dropFrames.push_back({ weaponServices, weapon, recordingSlot, weaponDefIndex, recordedEvent });
-    if (effectiveVelocity != velocity)
-        return KHook::Recall(reinterpret_cast<DropWeaponT>(g_addrDropWeapon), KHook::Return<void>{ KHook::Action::Ignore }, weaponServices,
-                             weapon, unused, effectiveVelocity);
     return { KHook::Action::Ignore };
 }
 
@@ -865,13 +843,7 @@ bool TakeCurrentReplayDrop(int slot, ReplayDropEvent& event)
     const ReplayTick& tick = p.ticks[cur];
     if ((tick.eventFlags & ReplayEventDrop) == 0) return false;
     event.weaponDefIndex = tick.eventWeaponDefIndex;
-    event.vectorFlags = tick.eventDropVectorFlags;
-    event.target[0] = tick.eventDropTargetX;
-    event.target[1] = tick.eventDropTargetY;
-    event.target[2] = tick.eventDropTargetZ;
-    event.velocity[0] = tick.eventDropVelocityX;
-    event.velocity[1] = tick.eventDropVelocityY;
-    event.velocity[2] = tick.eventDropVelocityZ;
+    // Legacy vector fields retain their ABI layout but no longer drive replay.
     return true;
 }
 
@@ -893,9 +865,8 @@ bool DropReplayEventWeapon(int slot, void* services, const ReplayDropEvent& even
     CCommand command;
     if (!command.Tokenize("drop")) return false;
 
-    g_activeReplayDropEvent = &event;
+    if (!PrepareReplayDropPawn(slot, services)) return false;
     dispatch::g_gameClients->ClientCommand(CPlayerSlot(slot), command);
-    g_activeReplayDropEvent = nullptr;
     return true;
 }
 
@@ -957,6 +928,44 @@ void WriteReplayViewHistory(void* services, void* pawn, float pitch, float yaw)
     const float normalizedYaw = NormalizeReplayYaw(yaw);
     WriteVector3(pawn, tg::g_pawnViewAnglePrevious, pitch, normalizedYaw, 0.0F);
     WriteVector3(services, tg::g_servicesOldViewAngles, pitch, normalizedYaw, 0.0F);
+}
+
+// Restores drop inputs without consuming the command's initial-position or seeded state.
+bool PrepareReplayDropPawn(int slot, void* services)
+{
+    MovementSnapshot pre{};
+    if (!services || !ReplayCommandViewSnapshot(slot, pre)) return false;
+    void* pawn = input_injector::ResolveReplayPawn(slot, services);
+    void** vtable = nullptr;
+    void* target = nullptr;
+    if (!pawn || tg::g_vtIdxTeleport < 0 || !SafeRead(pawn, 0, vtable) || !vtable ||
+        !SafeRead(vtable, tg::g_vtIdxTeleport * static_cast<int>(sizeof(void*)), target) || !target)
+        return false;
+
+    // Teleport updates engine spatial state even for a stationary or first-frame drop.
+    const float position[3] = { pre.originX, pre.originY, pre.originZ };
+    const float velocity[3] = { pre.velX, pre.velY, pre.velZ };
+    using TeleportFn = void(BC_FASTCALL*)(void*, const float*, const float*, const float*);
+    reinterpret_cast<TeleportFn>(target)(pawn, position, nullptr, velocity);
+    if (!IsReplaying(slot)) return false;
+    pawn = input_injector::ResolveReplayPawn(slot, services);
+    if (!pawn) return false;
+
+    WriteMovementServiceState(services, pre);
+    WriteField(pawn, tg::g_entMoveType, pre.moveType);
+    WriteField(pawn, tg::g_entActualMoveType, pre.actualMoveType);
+    uint32_t flags = 0;
+    if (SafeRead(pawn, tg::g_entFlags, flags))
+    {
+        const uint32_t mask = tg::kFlOnGround | tg::kFlDucking;
+        WriteField(pawn, tg::g_entFlags, (flags & ~mask) | (pre.entityFlags & mask));
+    }
+    bot_controller_hooks::ApplyReplayEyeAngles(pawn, pre.pitch, pre.yaw);
+    if (!IsReplaying(slot)) return false;
+    pawn = input_injector::ResolveReplayPawn(slot, services);
+    if (!pawn) return false;
+    WriteRawViewAnglesToPawn(pawn, pre.pitch, pre.yaw);
+    return true;
 }
 
 // Seeds pawn state before weapon and grenade code consumes the replayed command
