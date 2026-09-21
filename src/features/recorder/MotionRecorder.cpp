@@ -27,12 +27,8 @@ namespace tg = cs2bc::offsets;
 
 namespace cs2bc {
 namespace motion_recorder {
-#ifdef _WIN32
-using DropWeaponResult = uint8_t;
-#else
-using DropWeaponResult = void*;
-#endif
-using DropWeaponT = DropWeaponResult(BC_FASTCALL*)(void* weaponServices, void* weapon, void* target, void* velocity);
+// Both platform overrides ignore argument three and consume the optional velocity.
+using DropWeaponT = void(BC_FASTCALL*)(void* weaponServices, void* weapon, void* unused, const float* velocity);
 
 struct RecordState
 {
@@ -84,7 +80,7 @@ std::array<ReplayState, kMaxSlots> g_rep;
 std::atomic<uint64_t> g_recordingSlots{ 0 };
 std::atomic<uint64_t> g_replayingSlots{ 0 };
 static_assert(kMaxSlots <= 64);
-hooks::NativeHook<DropWeaponResult, void*, void*, void*, void*> g_hookDropWeapon;
+hooks::NativeHook<void, void*, void*, void*, const float*> g_hookDropWeapon;
 struct DropFrame
 {
     void* weaponServices;
@@ -118,7 +114,7 @@ void* FindReplayWeaponByDef(void* ws, int recordedDef)
 }
 
 // Copies an optional engine Vector into stable recording storage
-bool ReadDropVector(void* vector, float out[3]) { return vector && TryReadMemory(vector, 0, out, sizeof(float) * 3); }
+bool ReadDropVector(const float* vector, float out[3]) { return vector && TryReadMemory(vector, 0, out, sizeof(float) * 3); }
 
 // Prefers the recorder's exact cached weapon-services owner over controller handles
 int RecordingSlotForWeaponServices(void* weaponServices, void* pawn)
@@ -146,8 +142,8 @@ bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
     return true;
 }
 
-// Captures drop inputs and recalls the remaining hooks when replay changes vectors.
-KHook::Return<DropWeaponResult> HookedDropWeapon(void* weaponServices, void* weapon, void* target, void* velocity) noexcept
+// Captures drop velocity; the unused third argument is forwarded without dereferencing it.
+KHook::Return<void> HookedDropWeapon(void* weaponServices, void* weapon, void* unused, const float* velocity) noexcept
 {
     void* pawn = nullptr;
     if (weaponServices) GuardedRead(weaponServices, tg::g_servicesPawn, pawn);
@@ -158,21 +154,12 @@ KHook::Return<DropWeaponResult> HookedDropWeapon(void* weaponServices, void* wea
 
     ReplayDropEvent recordedEvent{};
     recordedEvent.weaponDefIndex = weaponDefIndex;
-    if (ReadDropVector(target, recordedEvent.target)) recordedEvent.vectorFlags |= ReplayDropVectorTarget;
     if (ReadDropVector(velocity, recordedEvent.velocity)) recordedEvent.vectorFlags |= ReplayDropVectorVelocity;
 
-    float replayTarget[3] = {};
     float replayVelocity[3] = {};
-    void* effectiveTarget = target;
-    void* effectiveVelocity = velocity;
+    const float* effectiveVelocity = velocity;
     if (g_activeReplayDropEvent)
     {
-        if ((g_activeReplayDropEvent->vectorFlags & ReplayDropVectorTarget) != 0)
-        {
-            for (int i = 0; i < 3; ++i)
-                replayTarget[i] = g_activeReplayDropEvent->target[i];
-            effectiveTarget = replayTarget;
-        }
         if ((g_activeReplayDropEvent->vectorFlags & ReplayDropVectorVelocity) != 0)
         {
             for (int i = 0; i < 3; ++i)
@@ -182,14 +169,14 @@ KHook::Return<DropWeaponResult> HookedDropWeapon(void* weaponServices, void* wea
     }
 
     g_dropFrames.push_back({ weaponServices, weapon, recordingSlot, weaponDefIndex, recordedEvent });
-    if (effectiveTarget != target || effectiveVelocity != velocity)
-        return KHook::Recall(reinterpret_cast<DropWeaponT>(g_addrDropWeapon), KHook::Return<DropWeaponResult>{ KHook::Action::Ignore },
-                             weaponServices, weapon, effectiveTarget, effectiveVelocity);
+    if (effectiveVelocity != velocity)
+        return KHook::Recall(reinterpret_cast<DropWeaponT>(g_addrDropWeapon), KHook::Return<void>{ KHook::Action::Ignore }, weaponServices,
+                             weapon, unused, effectiveVelocity);
     return { KHook::Action::Ignore };
 }
 
-// Records only physical detachments and preserves the engine's return value.
-KHook::Return<DropWeaponResult> DropWeaponPost(void*, void*, void*, void*) noexcept
+// Records only physical detachments; the native function has no return value.
+KHook::Return<void> DropWeaponPost(void*, void*, void*, const float*) noexcept
 {
     const auto [weaponServices, weapon, recordingSlot, weaponDefIndex, recordedEvent] = g_dropFrames.back();
     g_dropFrames.pop_back();

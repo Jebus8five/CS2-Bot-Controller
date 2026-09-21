@@ -127,7 +127,12 @@ inline int g_moveAbsOrigin = 200;
 
 inline int g_vtIdxPlayerRunCommand = 25;
 inline int g_vtIdxFinishMove = 38;
-inline int g_vtIdxDropWeapon = 24;
+// CCSPlayer_WeaponServices::DropWeapon (Itanium ABI has a second destructor slot).
+#ifdef _WIN32
+inline int g_vtIdxDropWeapon = 28;
+#else
+inline int g_vtIdxDropWeapon = 29;
+#endif
 
 void LoadFromGamedata(const nlohmann::json& gd);
 
