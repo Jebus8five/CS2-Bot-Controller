@@ -670,6 +670,7 @@ bool ReplayCommandFrameForSimulation(int slot, ReplayCommandFrame& out)
     if (!p.playing.load(std::memory_order_acquire)) return false;
 
     int recordedDef = -1;
+    bool recordedWeaponChanged = false;
     {
         std::scoped_lock lk(p.mu);
         const int total = static_cast<int>(p.ticks.size());
@@ -678,6 +679,7 @@ bool ReplayCommandFrameForSimulation(int slot, ReplayCommandFrame& out)
 
         out.tick = p.ticks[static_cast<size_t>(cur)];
         recordedDef = out.tick.weaponDefIndex;
+        recordedWeaponChanged = cur > 0 && !ReplayWeaponDefsMatch(p.ticks[static_cast<size_t>(cur - 1)].weaponDefIndex, recordedDef);
         out.commandView = out.tick.pre;
         out.buttons0 = out.tick.pre.buttons;
         out.buttons1 = out.tick.pre.buttons1;
@@ -728,7 +730,26 @@ bool ReplayCommandFrameForSimulation(int slot, ReplayCommandFrame& out)
             out.subticks[i] = p.subs[static_cast<size_t>(begin) + static_cast<size_t>(i)];
     }
 
-    out.weaponSelect = ReplayWeaponSelectForDef(slot, recordedDef);
+    if ((out.commandFields & kCommandFieldWeaponSelectDef) != 0)
+    {
+        // Replay requests, not post-simulation observations. A grenade can defer a
+        // switch, and reselecting the same item is still a meaningful request.
+        if (out.rawWeaponSelect > 0)
+        {
+            void* weapon = FindReplayWeaponByDef(weapon_locker_hooks::WsForSlot(slot), out.rawWeaponSelect);
+            if (weapon) out.weaponSelect = weapon_locker_hooks::WeaponEntIndex(weapon);
+        }
+        else if (p.needsInitialTeleport.load(std::memory_order_acquire) || recordedWeaponChanged)
+        {
+            // Preserve selections issued through client commands rather than UserCmd.
+            out.weaponSelect = ReplayWeaponSelectForDef(slot, recordedDef);
+        }
+    }
+    else
+    {
+        // Legacy recordings do not identify the requested weapon independently.
+        out.weaponSelect = ReplayWeaponSelectForDef(slot, recordedDef);
+    }
     return true;
 }
 
@@ -949,7 +970,7 @@ float NormalizeReplayYaw(float yaw)
     return yaw - 180.0F;
 }
 
-// Writes command view angles to the pawn fields read before movement processing
+// Restores frame-entry angles read by the native grenade parameter cache.
 void WriteRawViewAnglesToPawn(void* pawn, float pitch, float yaw)
 {
     const float normalizedYaw = NormalizeReplayYaw(yaw);
@@ -957,7 +978,7 @@ void WriteRawViewAnglesToPawn(void* pawn, float pitch, float yaw)
     WriteVector3(pawn, tg::g_pawnEyeAngles, pitch, normalizedYaw, 0.0F);
 }
 
-// Keeps the pawn and movement-service view history aligned with the command
+// Seeds view history from the frame boundary, not the command's later angle.
 void WriteReplayViewHistory(void* services, void* pawn, float pitch, float yaw)
 {
     const float normalizedYaw = NormalizeReplayYaw(yaw);
@@ -968,7 +989,7 @@ void WriteReplayViewHistory(void* services, void* pawn, float pitch, float yaw)
 // Seeds pawn state before weapon and grenade code consumes the replayed command
 } // namespace
 
-void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const MovementSnapshot& commandView)
+void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick)
 {
     if (!ValidSlot(slot) || !services || !g_rep[slot].playing.load(std::memory_order_acquire)) return;
 
@@ -1002,11 +1023,11 @@ void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const 
     WriteField(pawn, tg::g_entMoveType, tick.pre.moveType);
     WriteField(pawn, tg::g_entActualMoveType, tick.pre.actualMoveType);
     WriteSceneNodeOrigin(pawn, tick.pre);
-    bot_controller_hooks::ApplyReplayEyeAngles(pawn, commandView.pitch, commandView.yaw);
+    bot_controller_hooks::ApplyReplayEyeAngles(pawn, tick.pre.pitch, tick.pre.yaw);
     pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
-    WriteRawViewAnglesToPawn(pawn, commandView.pitch, commandView.yaw);
-    WriteReplayViewHistory(services, pawn, commandView.pitch, commandView.yaw);
+    WriteRawViewAnglesToPawn(pawn, tick.pre.pitch, tick.pre.yaw);
+    WriteReplayViewHistory(services, pawn, tick.pre.pitch, tick.pre.yaw);
 }
 
 // Applies the end snapshot only after the complete native simulation.

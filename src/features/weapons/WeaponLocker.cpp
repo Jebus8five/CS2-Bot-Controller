@@ -266,34 +266,30 @@ int EntIndexOf(void* entity)
 // entity index of a weapon, for cmd.weaponselect on replay.
 int WeaponEntIndex(void* weapon) { return EntIndexOf(weapon); }
 
-int ActiveWeaponDef(void* ws)
+// Records the requested item, which may differ from the active item during a throw.
+int WeaponDefForEntityIndex(void* ws, int entityIndex)
 {
-    if (!ws || !g_getSlot) return -1;
-    // m_hActiveWeapon is a handle; resolve it by matching its entity
-    // index against the pointers GetSlot returns
-    uint32_t activeH = 0;
-    if (!SafeRead(ws, tg::g_wsActiveWeapon, activeH)) return -1;
-    if (activeH == 0U || activeH == 0xFFFFFFFFU) return -1;
-    int activeIdx = static_cast<int>(activeH & 0x7FFFU);
+    if (!ws || !g_getSlot || entityIndex <= 0 || entityIndex >= 0x7FFF) return -1;
     for (int slot = 0; slot <= 4; ++slot)
     {
-        // GEAR_SLOT_GRENADES (3) holds every grenade type at once
-        unsigned int maxPos = (slot == 3) ? 8U : 1U;
-        for (unsigned int pos = 0; pos < maxPos; ++pos)
+        const unsigned int count = slot == 3 ? 8U : 1U;
+        for (unsigned int pos = 0; pos < count; ++pos)
         {
-            unsigned int posArg = (slot == 3) ? pos : 0xFFFFFFFFU;
-            void* w = g_getSlot(ws, slot, posArg);
-            if (w && EntIndexOf(w) == activeIdx)
-            {
-                int def = ReadDefIndex(w);
-                // Engine slot 2 holds knife AND taser. Normalize any
-                // knife skin to kKnifeDef; keep the taser (31) as-is.
-                if (slot == 2 && def != 31) return kKnifeDef;
-                return def;
-            }
+            void* weapon = g_getSlot(ws, slot, slot == 3 ? pos : 0xFFFFFFFFU);
+            if (EntIndexOf(weapon) != entityIndex) continue;
+            const int def = ReadDefIndex(weapon);
+            return slot == 2 && def >= 0 && def != 31 ? kKnifeDef : def;
         }
     }
     return -1;
+}
+
+// Stops the inventory search as soon as the active item is found.
+int ActiveWeaponDef(void* ws)
+{
+    uint32_t handle = 0;
+    if (!ws || !SafeRead(ws, tg::g_wsActiveWeapon, handle) || handle == 0U || handle == 0xFFFFFFFFU) return -1;
+    return WeaponDefForEntityIndex(ws, static_cast<int>(handle & 0x7FFFU));
 }
 
 void* FindWeaponByDef(void* ws, int def)

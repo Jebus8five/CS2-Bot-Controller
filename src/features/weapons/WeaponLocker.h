@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -37,6 +38,9 @@ int ReadDefIndex(void* weapon);
 
 // Entity index of a weapon (identity ehandle low bits). -1 if null
 int WeaponEntIndex(void* weapon);
+
+// Resolves a command's entity index only within the owner's inventory; normalizes knives.
+int WeaponDefForEntityIndex(void* ws, int entityIndex);
 
 // Active weapon's def index for a WeaponServices*. -1 if none/unresolved
 int ActiveWeaponDef(void* ws);

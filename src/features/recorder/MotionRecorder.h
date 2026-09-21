@@ -95,7 +95,7 @@ struct ReplayCommandFrameData
     uint64_t buttons2;
     int32_t mouseDx;
     int32_t mouseDy;
-    int32_t weaponSelect;
+    int32_t weaponSelect; // item def for WeaponSelectDef frames; entity index in legacy frames
     uint32_t fields;
     uint8_t leftHandDesired;
     uint8_t pad[3];
@@ -134,6 +134,8 @@ constexpr uint32_t kCommandFieldButtons = 1U << 4;
 constexpr uint32_t kCommandFieldMouse = 1U << 5;
 constexpr uint32_t kCommandFieldWeaponSelect = 1U << 6;
 constexpr uint32_t kCommandFieldLeftHand = 1U << 7;
+// Marks all new frames, including frames without a weapon-selection request.
+constexpr uint32_t kCommandFieldWeaponSelectDef = 1U << 8;
 
 // Complete replay input frame assembled for PlayerRunCommand
 struct ReplayCommandFrame
@@ -243,7 +245,7 @@ bool DropHookReady();
 
 // ---- replay write hooks ----
 // PlayerRunCommand (pre): seed pawn state consumed by weapon and grenade logic
-void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick, const MovementSnapshot& commandView);
+void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick);
 // PhysicsSimulate (post): restore the end snapshot and advance the cursor.
 void OnReplayCommit(int slot, void* services, bool simulated);
 

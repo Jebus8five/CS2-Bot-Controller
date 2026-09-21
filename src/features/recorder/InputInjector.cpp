@@ -17,6 +17,7 @@
 #include "usercmd.pb.h"
 #include "offsets.h"
 #include "hooks.h"
+#include "WeaponLocker.h"
 
 #include <algorithm> // NOLINT(misc-include-cleaner)
 #include <array>
@@ -483,7 +484,7 @@ MovementFrame* FindPhysicsFrame(int slot)
 // ---- PlayerRunCommand: subtick record + re-inject ----
 
 // Serializes command fields and subticks into the pending recording frame.
-void CaptureUserCommand(int slot, PlayerCommand* pc, CBaseUserCmdPB* base)
+void CaptureUserCommand(int slot, void* services, PlayerCommand* pc, CBaseUserCmdPB* base)
 {
     // Read this tick's subtick_moves into SubtickMove[] and
     // stash; OnCapturePost (PhysicsSimulate-post) commits them.
@@ -504,6 +505,7 @@ void CaptureUserCommand(int slot, PlayerCommand* pc, CBaseUserCmdPB* base)
     motion_recorder::OnCaptureSubticks(slot, moves, n);
 
     ReplayCommandFrameData command{};
+    command.fields |= motion_recorder::kCommandFieldWeaponSelectDef;
     command.buttons = pc->buttonstates.m_pButtonStates[0];
     command.buttons1 = pc->buttonstates.m_pButtonStates[1];
     command.buttons2 = pc->buttonstates.m_pButtonStates[2];
@@ -539,7 +541,10 @@ void CaptureUserCommand(int slot, PlayerCommand* pc, CBaseUserCmdPB* base)
     }
     if (base->has_weaponselect())
     {
-        command.weaponSelect = base->weaponselect();
+        command.weaponSelect = base->weaponselect() > 0
+                                   ? weapon_locker_hooks::WeaponDefForEntityIndex(
+                                         pawn_binding::ServicesToWeaponServices(slot, services, nullptr), base->weaponselect())
+                                   : 0;
         command.fields |= motion_recorder::kCommandFieldWeaponSelect;
     }
     if (pc->has_left_hand_desired())
@@ -589,7 +594,22 @@ void ApplyReplayUserCommand(int slot, void* services, PlayerCommand* pc, CBaseUs
             base->set_mousedy(frame.mouseDy);
         }
         if ((frame.commandFields & motion_recorder::kCommandFieldLeftHand) != 0) pc->set_left_hand_desired(frame.leftHandDesired != 0);
+        if ((frame.commandFields & motion_recorder::kCommandFieldWeaponSelectDef) != 0)
+        {
+            // Absent recorded fields mean protobuf defaults, not leftover bot input.
+            if ((frame.commandFields & motion_recorder::kCommandFieldForwardMove) == 0) base->clear_forwardmove();
+            if ((frame.commandFields & motion_recorder::kCommandFieldLeftMove) == 0) base->clear_leftmove();
+            if ((frame.commandFields & motion_recorder::kCommandFieldUpMove) == 0) base->clear_upmove();
+            if ((frame.commandFields & motion_recorder::kCommandFieldMouse) == 0)
+            {
+                base->clear_mousedx();
+                base->clear_mousedy();
+            }
+            if ((frame.commandFields & motion_recorder::kCommandFieldLeftHand) == 0) pc->clear_left_hand_desired();
+        }
         if (frame.weaponSelect >= 0) base->set_weaponselect(frame.weaponSelect);
+        else
+            base->clear_weaponselect();
 
         // Replace the command's subtick moves with the recorded set for this tick
         base->clear_subtick_moves();
@@ -619,7 +639,7 @@ void ApplyReplayUserCommand(int slot, void* services, PlayerCommand* pc, CBaseUs
         if (boundary && !boundary->seeded)
         {
             boundary->seeded = true;
-            motion_recorder::OnReplayCommandPre(slot, services, frame.tick, frame.commandView);
+            motion_recorder::OnReplayCommandPre(slot, services, frame.tick);
         }
     }
 }
@@ -639,7 +659,7 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
         auto* pc = reinterpret_cast<PlayerCommand*>(cmd);
         CBaseUserCmdPB* base = pc->mutable_base();
 
-        if (recording) CaptureUserCommand(slot, pc, base);
+        if (recording) CaptureUserCommand(slot, services, pc, base);
 
         if (replaying) ApplyReplayUserCommand(slot, services, pc, base);
 
