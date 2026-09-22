@@ -104,7 +104,7 @@ void* ReplayControllerForPawn(void* pawn)
 }
 #endif
 
-// Calls SetEyeAngles while temporarily bypassing the new fake-client early-out.
+// Updates replay angles without queuing a server correction over the next UserCmd.
 bool ApplyReplayEyeAnglesInternal(void* pawn, float pitch, float yaw)
 {
     if (!pawn || !g_hookSetEyeAngles.Active()) return false;
@@ -113,16 +113,17 @@ bool ApplyReplayEyeAnglesInternal(void* pawn, float pitch, float yaw)
 #ifdef _WIN32
     void* controller = ReplayControllerForPawn(pawn);
     uint32_t controllerFlags = 0;
-    bool restoreFakeClient = false;
-    if (controller && SafeRead(controller, tg::g_entFlags, controllerFlags) && (controllerFlags & 0x100U) != 0)
+    if (!controller || !SafeRead(controller, tg::g_entFlags, controllerFlags)) return false;
+    const bool restoreControllerFlags = (controllerFlags & 0x100U) == 0;
+    if (restoreControllerFlags)
     {
-        const uint32_t publishedFlags = controllerFlags & ~0x100U;
-        restoreFakeClient = WriteField(controller, tg::g_entFlags, publishedFlags);
+        const uint32_t replayFlags = controllerFlags | 0x100U;
+        if (!WriteField(controller, tg::g_entFlags, replayFlags)) return false;
     }
 #endif
     g_hookSetEyeAngles.CallOriginal(pawn, angle);
 #ifdef _WIN32
-    if (restoreFakeClient) WriteField(controller, tg::g_entFlags, controllerFlags);
+    if (restoreControllerFlags) WriteField(controller, tg::g_entFlags, controllerFlags);
 #endif
     return true;
 }

@@ -101,7 +101,7 @@ bool PrepareReplayDropPawn(int slot, void* services);
 // Returns whether an item definition is either faction's fire grenade
 bool IsFireGrenadeDef(int defIndex) { return defIndex == kMolotovDef || defIndex == kIncendiaryDef; }
 
-// Prefers the recorded fire grenade and falls back to the other faction's variant
+// Prefers the recorded fire grenade
 void* FindReplayWeaponByDef(void* ws, int recordedDef)
 {
     void* weapon = weapon_locker_hooks::FindWeaponByDef(ws, recordedDef);
@@ -137,27 +137,32 @@ bool CaptureDropEvent(int slot, const ReplayDropEvent& event)
     return true;
 }
 
-// Records the drop event and item; all native arguments remain untouched.
+// Records the drop event and item
 KHook::Return<void> HookedDropWeapon(void* weaponServices, void* weapon, void*, const float*) noexcept
 {
     void* pawn = nullptr;
     if (weaponServices) GuardedRead(weaponServices, tg::g_servicesPawn, pawn);
     const int recordingSlot = RecordingSlotForWeaponServices(weaponServices, pawn);
-    int weaponDefIndex = weapon_locker_hooks::ReadDefIndex(weapon);
-    if (weaponDefIndex < 0 && weaponServices) weaponDefIndex = weapon_locker_hooks::ActiveWeaponDef(weaponServices);
-    if (weaponDefIndex < 0 && ValidSlot(recordingSlot)) weaponDefIndex = g_rec[recordingSlot].currentDef.load(std::memory_order_relaxed);
+    const int weaponDefIndex = weapon_locker_hooks::ReadDefIndex(weapon);
 
     ReplayDropEvent recordedEvent{};
-    recordedEvent.weaponDefIndex = weaponDefIndex;
+    recordedEvent.weaponDefIndex = -1;
+    // Keep the raw definition for detachment checks, but record knives by role.
+    if (ValidSlot(recordingSlot))
+    {
+        recordedEvent.weaponDefIndex =
+            weapon_locker_hooks::WeaponDefForEntityIndex(weaponServices, weapon_locker_hooks::WeaponEntIndex(weapon));
+    }
     g_dropFrames.push_back({ weaponServices, weapon, recordingSlot, weaponDefIndex, recordedEvent });
     return { KHook::Action::Ignore };
 }
 
-// Records only physical detachments; the native function has no return value.
+// Records only physical detachments
 KHook::Return<void> DropWeaponPost(void*, void*, void*, const float*) noexcept
 {
     const auto [weaponServices, weapon, recordingSlot, weaponDefIndex, recordedEvent] = g_dropFrames.back();
     g_dropFrames.pop_back();
+    if (recordedEvent.weaponDefIndex < 0) return { KHook::Action::Ignore };
     const bool detached =
         weaponServices && weapon && weaponDefIndex >= 0 && weapon_locker_hooks::FindWeaponByDef(weaponServices, weaponDefIndex) != weapon;
     if (detached && ValidSlot(recordingSlot))
@@ -215,14 +220,12 @@ bool ReadVector3(void* base, int offset, float& x, float& y, float& z)
     return true;
 }
 
-// Writes a three-float engine vector through one guarded memory operation.
 bool WriteVector3(void* base, int offset, float x, float y, float z)
 {
     const float values[3] = { x, y, z };
     return TryWriteMemory(base, offset, values, sizeof(values));
 }
 
-// Resolves the current scene node through the July 2026 body component layout.
 void* ResolveSceneNode(void* entity)
 {
     void* body = nullptr;
@@ -689,8 +692,7 @@ bool ReplayCommandFrameForSimulation(int slot, ReplayCommandFrame& out)
             out.subticks[i] = p.subs[static_cast<size_t>(begin) + static_cast<size_t>(i)];
     }
 
-    // Replay requests, not post-simulation observations. A grenade can defer a
-    // switch, and reselecting the same item is still a meaningful request.
+    // Replay requests
     if (out.rawWeaponSelect > 0)
     {
         void* weapon = FindReplayWeaponByDef(weapon_locker_hooks::WsForSlot(slot), out.rawWeaponSelect);
@@ -843,7 +845,6 @@ bool TakeCurrentReplayDrop(int slot, ReplayDropEvent& event)
     const ReplayTick& tick = p.ticks[cur];
     if ((tick.eventFlags & ReplayEventDrop) == 0) return false;
     event.weaponDefIndex = tick.eventWeaponDefIndex;
-    // Legacy vector fields retain their ABI layout but no longer drive replay.
     return true;
 }
 
@@ -858,6 +859,8 @@ bool DropReplayEventWeapon(int slot, void* services, const ReplayDropEvent& even
     if (!pawn || !GuardedRead(pawn, tg::g_pawnWeaponServices, ws) || !ws) return false;
     void* weapon = weapon_locker_hooks::FindWeaponByDef(ws, weaponDefIndex);
     if (!weapon) return false;
+    const int replayDef = weapon_locker_hooks::WeaponDefForEntityIndex(ws, weapon_locker_hooks::WeaponEntIndex(weapon));
+    if (replayDef != weaponDefIndex) return false;
     if (weapon_locker_hooks::ActiveWeaponDef(ws) != weaponDefIndex && !weapon_locker_hooks::SelectWeaponRaw(ws, weapon)) return false;
     if (weapon_locker_hooks::ActiveWeaponDef(ws) != weaponDefIndex) return false;
 

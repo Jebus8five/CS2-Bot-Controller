@@ -246,5 +246,12 @@
       "linux": 29
     },
     "comment": "CCSPlayer_WeaponServices::DropWeapon: void(services, weapon, unused, velocity)"
+  },
+  "vtidx::ControllerCommandSetup": {
+    "offsets": {
+      "windows": 238,
+      "linux": 239
+    },
+    "comment": "void(controller); post runs immediately before queued client commands inside OnSimulateUserCommands."
   }
 }

@@ -127,6 +127,12 @@ inline int g_moveAbsOrigin = 200;
 
 inline int g_vtIdxPlayerRunCommand = 25;
 inline int g_vtIdxFinishMove = 38;
+// Controller setup immediately preceding queued client commands.
+#ifdef _WIN32
+inline int g_vtIdxControllerCommandSetup = 238;
+#else
+inline int g_vtIdxControllerCommandSetup = 239;
+#endif
 // CCSPlayer_WeaponServices::DropWeapon
 #ifdef _WIN32
 inline int g_vtIdxDropWeapon = 28;

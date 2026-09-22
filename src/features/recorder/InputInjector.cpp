@@ -52,6 +52,8 @@ void* g_addrPhysicsSimulate = nullptr;
 hooks::NativeHook<void, void*, void*> g_hookProcessMovement;
 hooks::NativeHook<void, void*, void*> g_hookPlayerRunCommand;
 hooks::NativeHook<void, void*> g_hookPhysicsSimulate;
+hooks::NativeHook<void, void*> g_hookControllerCommandSetup;
+std::atomic<bool> g_controllerHookTried{ false };
 
 struct MovementFrame
 {
@@ -670,9 +672,35 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 // ---- PhysicsSimulate: the per-tick boundary ----
 // Records pre/post + commits
 
+// Dispatches drops after native command setup, at the client-command boundary.
+KHook::Return<void> ControllerCommandSetupPost(void* controller) noexcept
+{
+    if (g_physicsFrames.empty()) return { KHook::Action::Ignore };
+    // Do not cross an inactive/nested simulation frame to consume an outer event.
+    const MovementFrame frame = g_physicsFrames.back();
+    if (frame.replaying && frame.services && ControllerToSlot(controller) == frame.slot && motion_recorder::IsReplaying(frame.slot))
+        ApplyReplayDrop(frame.slot, frame.services);
+    return { KHook::Action::Ignore };
+}
+
+// Resolves the controller's per-command setup independently of movement services.
+void EnsureControllerCommandHook(void* controller)
+{
+    if (!controller || g_controllerHookTried.exchange(true, std::memory_order_acq_rel)) return;
+    void** vtable = nullptr;
+    void* target = nullptr;
+    if (tg::g_vtIdxControllerCommandSetup >= 0 && GuardedRead(controller, 0, vtable) && vtable &&
+        GuardedRead(static_cast<const void*>(vtable), tg::g_vtIdxControllerCommandSetup * static_cast<int>(sizeof(void*)), target) &&
+        target && g_hookControllerCommandSetup.Install(target, nullptr, &ControllerCommandSetupPost))
+        return;
+    g_hookControllerCommandSetup.Remove();
+    BC_LOG_WARN("Controller command setup hook unavailable; recording and replay are disabled\n");
+}
+
 // Captures the per-tick state before any subtick movement.
 KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
 {
+    EnsureControllerCommandHook(controller);
     if (!motion_recorder::HasAnyRecording() && !motion_recorder::HasAnyReplay())
     {
         // Keep the matching post callback from consuming an outer frame.
@@ -697,9 +725,6 @@ KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
 
     // pre: snapshot start-of-tick state once (before any subtick mover).
     if (recording) motion_recorder::OnCapturePre(slot, services, nullptr);
-
-    // Client commands are normally handled before this tick's player simulation.
-    if (replaying) ApplyReplayDrop(slot, services);
 
     return { KHook::Action::Ignore };
 }
@@ -793,6 +818,7 @@ void Remove()
     if (!g_installed) return;
     g_hookProcessMovement.Remove();
     g_hookPlayerRunCommand.Remove();
+    g_hookControllerCommandSetup.Remove();
     g_hookPhysicsSimulate.Remove();
     g_addrProcessMovement = nullptr;
     g_addrPlayerRunCommand = nullptr;
@@ -800,6 +826,7 @@ void Remove()
     g_physicsActive = false;
     g_subtickActive = false;
     g_vtHooksTried.store(false, std::memory_order_release);
+    g_controllerHookTried.store(false, std::memory_order_release);
     for (auto& s : g_slotServices)
         s.store(nullptr, std::memory_order_release);
     pawn_binding::ClearAll();
@@ -818,11 +845,12 @@ void Remove()
     g_status = "not_attempted";
 }
 
-// Recording and replay require both frame boundaries and command injection.
+// Recording and replay require frame, client-command, and movement boundaries.
 bool RecorderReady()
 {
-    if (g_physicsActive && g_subtickActive) return true;
-    BC_LOG_WARN("Cannot start recording/replay: PhysicsSimulate=%d PlayerRunCommand=%d\n", g_physicsActive, g_subtickActive);
+    if (g_physicsActive && g_subtickActive && g_hookControllerCommandSetup.Active()) return true;
+    BC_LOG_WARN("Cannot start recording/replay: PhysicsSimulate=%d PlayerRunCommand=%d ControllerCommandSetup=%d\n", g_physicsActive,
+                g_subtickActive, g_hookControllerCommandSetup.Active());
     return false;
 }
 

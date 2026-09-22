@@ -35,6 +35,7 @@ void LoadFromGamedata(const nlohmann::json& gd)
     g_moveAbsOrigin = gameconfig::FindPlatformOffset(gd, "CMoveData::AbsOrigin", g_moveAbsOrigin);
     g_vtIdxPlayerRunCommand = gameconfig::FindPlatformOffset(gd, "vtidx::PlayerRunCommand", g_vtIdxPlayerRunCommand);
     g_vtIdxFinishMove = gameconfig::FindPlatformOffset(gd, "vtidx::FinishMove", g_vtIdxFinishMove);
+    g_vtIdxControllerCommandSetup = gameconfig::FindPlatformOffset(gd, "vtidx::ControllerCommandSetup", g_vtIdxControllerCommandSetup);
     g_vtIdxDropWeapon = gameconfig::FindPlatformOffset(gd, "vtidx::DropWeapon", g_vtIdxDropWeapon);
 }
 
