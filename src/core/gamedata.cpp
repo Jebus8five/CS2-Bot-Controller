@@ -2,6 +2,7 @@
 #include "core/gamedata.h"
 #include "platform.h"
 #include "offsets.h"
+#include "core/memory_module.h"
 #include <cstdio>
 #include <string>
 namespace cs2bc::gamedata {
@@ -24,7 +25,7 @@ std::string ComputeGamedataPath()
 } // namespace
 
 // Locates gamedata relative to this plugin and validates its server module.
-bool Load(void* serverIface, nlohmann::json& gd, modules::ModuleInfo& serverModule, char* error, size_t maxlen)
+bool Load(nlohmann::json& gd, modules::ModuleInfo& serverModule, char* error, size_t maxlen)
 {
     std::string gamedataPath = ComputeGamedataPath();
     if (gamedataPath.empty())
@@ -39,12 +40,14 @@ bool Load(void* serverIface, nlohmann::json& gd, modules::ModuleInfo& serverModu
         return false;
     }
 
-    serverModule = cs2bc::modules::ModuleFromInterfacePtr(serverIface);
-    if (!serverModule)
+    cs2bc::modules::Initialize();
+    if (!cs2bc::modules::server || !cs2bc::modules::server->Image())
     {
-        std::snprintf(error, maxlen, "ModuleFromInterfacePtr returned null");
+        std::snprintf(error, maxlen, "Could not open CS2 server module at '%s'",
+                      cs2bc::modules::server ? cs2bc::modules::server->Path() : "");
         return false;
     }
+    serverModule = cs2bc::modules::server->Image();
 
     // Resolve non-Schema offsets before installing hooks that read targets
     cs2bc::offsets::LoadFromGamedata(gd);

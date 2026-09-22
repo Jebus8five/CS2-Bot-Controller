@@ -4,6 +4,9 @@
 
 #include <cstddef>
 
+class ISchemaSystem;
+extern ISchemaSystem* g_schemaSystem;
+
 namespace cs2bc::schema {
 
 // Resolves the live SchemaSystem interface and server type scope

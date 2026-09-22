@@ -67,7 +67,7 @@ bool BotControllerPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t m
 
         nlohmann::json gd;
         modules::ModuleInfo serverModule;
-        if (!gamedata::Load(interfaces::ServerInterface(), gd, serverModule, error, maxlen)) return false;
+        if (!gamedata::Load(gd, serverModule, error, maxlen)) return false;
 
         if (!cs2bc::weapon_locker_hooks::Install(gd, serverModule, error, maxlen)) return false;
 
