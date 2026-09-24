@@ -291,7 +291,13 @@ public sealed class PocHarnessPlugin : BasePlugin
     {
         Log("[gate3] DISABLED: source-verified (MotionRecorder.cpp OnReplayCommandPre/OnReplayCommit) to unconditionally teleport the pawn to world origin and clobber velocity/movetype/ground-flag/duck state every replay tick when MovementSnapshot.Origin/Vel/etc. are zeroed, as this gate currently constructs them. Needs a live pre-read of the bot's actual state wired into the snapshot before this can run safely. Not executed.");
         return;
-#pragma warning disable CS0162 // deliberately unreachable: preserved for the future fix described above, not deleted outright
+#if false
+        // Excluded from compilation, not just from execution: this preserves the
+        // original design for a future fix but guarantees Gate 3 cannot run and
+        // cannot even affect whether this file builds. Re-enabling requires both
+        // removing this #if false and replacing the zeroed fields below with a
+        // live pre-read of the target bot's actual state (see the comment above
+        // OnGate3 and the README's "Gate 3 disabled" section).
         if (!int.TryParse(cmd.GetArg(1), out var slot)
             || !float.TryParse(cmd.GetArg(2), out var pitch)
             || !float.TryParse(cmd.GetArg(3), out var yaw)
@@ -352,7 +358,7 @@ public sealed class PocHarnessPlugin : BasePlugin
         _gate3Active = true;
         _lastGate3Slot = slot;
         Log($"[gate3] sampling started for {durationMs}ms, target pitch={pitch:F4} yaw={yaw:F4}");
-#pragma warning restore CS0162
+#endif
     }
 
     private void FinishGate3()
