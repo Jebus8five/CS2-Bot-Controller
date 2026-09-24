@@ -9,9 +9,9 @@
 namespace cs2bc::offsets {
 // Engine Teleport virtual slot, required for replay start positioning.
 #ifdef _WIN32
-inline int g_vtIdxTeleport = 163;
+inline int g_vtIdxTeleport = 165;
 #else
-inline int g_vtIdxTeleport = 162;
+inline int g_vtIdxTeleport = 164;
 #endif
 // ---- CCSBot ----
 
@@ -125,13 +125,18 @@ inline int g_moveAbsOrigin = 200;
 
 // ---- vtable indices (CCSPlayer_MovementServices) ----
 
+#ifdef _WIN32
 inline int g_vtIdxPlayerRunCommand = 25;
 inline int g_vtIdxFinishMove = 38;
+#else
+inline int g_vtIdxPlayerRunCommand = 26;
+inline int g_vtIdxFinishMove = 39;
+#endif
 // Controller setup immediately preceding queued client commands.
 #ifdef _WIN32
-inline int g_vtIdxControllerCommandSetup = 238;
+inline int g_vtIdxControllerCommandSetup = 240;
 #else
-inline int g_vtIdxControllerCommandSetup = 239;
+inline int g_vtIdxControllerCommandSetup = 241;
 #endif
 // CCSPlayer_WeaponServices::DropWeapon
 #ifdef _WIN32
