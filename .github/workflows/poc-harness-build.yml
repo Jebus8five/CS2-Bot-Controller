@@ -1,0 +1,57 @@
+name: PoC Harness Build
+
+# Separate, additive workflow. Does NOT modify build.yml and does NOT build,
+# package, or release BotController itself. Builds only the disposable,
+# external poc/BotControllerPocHarness project (see poc/README.md) with the
+# .NET 10 SDK, for a requester whose local machine only has .NET 8. Manual
+# dispatch only -- never runs on push/PR, never touches native (src/) code.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-poc-harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build harness (also builds its BotControllerApi project reference)
+        run: dotnet build poc/BotControllerPocHarness -c Release
+
+      - name: Stage artifact + dependency
+        run: |
+          set -euo pipefail
+          dist=dist/poc-harness
+          mkdir -p "$dist"
+          cp poc/BotControllerPocHarness/bin/Release/BotControllerPocHarness.dll "$dist/"
+          cp poc/BotControllerPocHarness/bin/Release/BotControllerPocHarness.pdb "$dist/" 2>/dev/null || true
+          # Required dependency: the interface assembly the harness resolves
+          # BotControllerCapability against at runtime. Built here from this
+          # repo's own csharp/BotControllerApi source at this same commit via
+          # the ProjectReference above -- not copied from anywhere else.
+          cp csharp/BotControllerApi/bin/Release/BotControllerApi.dll "$dist/"
+          cp csharp/BotControllerApi/bin/Release/BotControllerApi.pdb "$dist/" 2>/dev/null || true
+          cp poc/BotControllerPocHarness/README.md "$dist/HARNESS-README.md"
+          {
+            echo "Built from commit: ${{ github.sha }}"
+            echo "Source workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            echo "SHA-256 (sha256sum format):"
+            (cd "$dist" && sha256sum *.dll *.pdb 2>/dev/null || sha256sum *.dll)
+          } > "$dist/BUILD-INFO.txt"
+          cat "$dist/BUILD-INFO.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: BotControllerPocHarness-poc-${{ github.sha }}
+          path: dist/poc-harness/
+          if-no-files-found: error
