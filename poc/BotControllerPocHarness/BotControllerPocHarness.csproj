@@ -43,7 +43,7 @@
       published interface assembly, same interop shape CS2-Smarter-Bot uses
       (PluginCapability lookup), not source inclusion.
     -->
-    <ProjectReference Include="..\..\csharp\BotControllerApi\BotControllerApi.csproj">
+    <ProjectReference Include="../../csharp/BotControllerApi/BotControllerApi.csproj">
       <Private>false</Private>
     </ProjectReference>
   </ItemGroup>
