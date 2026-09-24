@@ -16,9 +16,9 @@ inline int g_vtIdxTeleport = 164;
 // ---- CCSBot ----
 
 // AI-ran-this-tick byte flag; set to 1 to fake a completed tick
-inline int g_botAiTickedFlag = 0x610;
+inline int g_botAiTickedFlag = -1;
 // CCSBot -> pawn (CCSPlayerPawn*)
-inline int g_botPawn = 0x18;
+inline int g_botPawn = -1;
 // CCSBot -> m_profile (BotProfile*)
 inline int g_botProfile = 0x08;
 
@@ -47,74 +47,74 @@ inline int g_buyDoneBuying = 0x18;
 // ---- CBaseEntity / CEntityIdentity ----
 
 // entity -> CEntityIdentity*
-inline int g_entIdentity = 0x10;
+inline int g_entIdentity = -1;
 // CEntityIdentity -> m_EHandle (low 15 bits = entity index)
 inline int g_entIdentityEHandle = 0x10;
 // m_MoveType (MoveType_t, 1 byte) — restored each replay tick
-inline int g_entMoveType = 0x2F3;
+inline int g_entMoveType = -1;
 // m_nActualMoveType (MoveType_t, 1 byte) — networked move type
-inline int g_entActualMoveType = 0x2F5;
+inline int g_entActualMoveType = -1;
 // m_fFlags (bit0 = FL_ONGROUND, bit1 = FL_DUCKING)
-inline int g_entFlags = 0x388;
+inline int g_entFlags = -1;
 // m_fFlags bit masks restored on replay (constants, not offsets)
 inline constexpr unsigned kFlOnGround = 1U << 0;
 inline constexpr unsigned kFlDucking = 1U << 1;
 // m_vecAbsVelocity
-inline int g_entAbsVelocity = 0x38C;
+inline int g_entAbsVelocity = -1;
 // entity -> m_CBodyComponent -> m_pSceneNode
-inline int g_entBodyComponent = 0x30;
-inline int g_bodySceneNode = 0x08;
-inline int g_nodeAbsOrigin = 0xC8;
+inline int g_entBodyComponent = -1;
+inline int g_bodySceneNode = -1;
+inline int g_nodeAbsOrigin = -1;
 
 // ---- CCSPlayerPawn ----
 
 // m_pWeaponServices
-inline int g_pawnWeaponServices = 0xA30;
+inline int g_pawnWeaponServices = -1;
 // m_pItemServices
-inline int g_pawnItemServices = 0xA20;
+inline int g_pawnItemServices = -1;
 // m_pMovementServices
-inline int g_pawnMovementServices = 0xA70;
+inline int g_pawnMovementServices = -1;
 // m_hController (CHandle)
-inline int g_pawnController = 0xBB0;
+inline int g_pawnController = -1;
 // m_hOriginalController (CHandle)
-inline int g_pawnOriginalController = 0xD24;
+inline int g_pawnOriginalController = -1;
 // CCSPlayerPawn -> v_angle (QAngle)
-inline int g_pawnViewAngle = 0xAE8;
+inline int g_pawnViewAngle = -1;
 // CCSPlayerPawn -> v_anglePrevious (QAngle)
-inline int g_pawnViewAnglePrevious = 0xAF4;
+inline int g_pawnViewAnglePrevious = -1;
 // Embedded server view-angle change vector
-inline int g_pawnServerViewAngleChanges = 0xA80;
+inline int g_pawnServerViewAngleChanges = -1;
 // m_angEyeAngles (QAngle) — written each replay tick alongside v_angle
-inline int g_pawnEyeAngles = 0x1368;
+inline int g_pawnEyeAngles = -1;
 
 // ---- CCSPlayer_WeaponServices ----
 
 // m_hActiveWeapon (CHandle)
-inline int g_wsActiveWeapon = 0x60;
+inline int g_wsActiveWeapon = -1;
 
 // ---- CBasePlayerWeapon ----
 
 // m_AttributeManager -> m_Item -> m_iItemDefinitionIndex,
-inline int g_weaponItemDefIndex = 0x978 + 0x50 + 0x38;
+inline int g_weaponItemDefIndex = -1;
 
 // ---- CCSPlayer_MovementServices ----
 
 // m_pawn (CCSPlayerPawn*)
 inline int g_servicesPawn = 56;
 // m_nButtons.m_pButtonStates[0..2] — engine button state block (CInButtonState)
-inline int g_servicesButtons = 88; // states[0] (pressed)
-inline int g_servicesButtons1 = 88 + 8; // states[1]
-inline int g_servicesButtons2 = 88 + 16; // states[2]
+inline int g_servicesButtons = -1; // states[0] (pressed)
+inline int g_servicesButtons1 = -1; // states[1]
+inline int g_servicesButtons2 = -1; // states[2]
 // Previous command view angles consumed by PlayerRunCommand
-inline int g_servicesOldViewAngles = 0x240;
+inline int g_servicesOldViewAngles = -1;
 
 // duck/ladder state
-inline int g_servicesLadderNormal = 0x3F8; // Vector m_vecLadderNormal
-inline int g_servicesDucked = 0x408; // bool m_bDucked
-inline int g_servicesDuckAmount = 0x40C; // float m_flDuckAmount
-inline int g_servicesDuckSpeed = 0x410; // float m_flDuckSpeed
-inline int g_servicesDesiresDuck = 0x415; // bool m_bDesiresDuck
-inline int g_servicesDucking = 0x416; // bool m_bDucking
+inline int g_servicesLadderNormal = -1; // Vector m_vecLadderNormal
+inline int g_servicesDucked = -1; // bool m_bDucked
+inline int g_servicesDuckAmount = -1; // float m_flDuckAmount
+inline int g_servicesDuckSpeed = -1; // float m_flDuckSpeed
+inline int g_servicesDesiresDuck = -1; // bool m_bDesiresDuck
+inline int g_servicesDucking = -1; // bool m_bDucking
 
 // ---- CMoveData  ----
 
