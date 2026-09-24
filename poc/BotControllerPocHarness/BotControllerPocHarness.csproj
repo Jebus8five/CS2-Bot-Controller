@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Disposable, experimental test harness for the BotController control-chain PoC,
+    from the cs2-ai-training project. NOT part of this repository's own production
+    surface -- lives entirely under poc/, is not referenced by CMakeLists.txt or
+    any existing .sln/.csproj, and is not built by the existing Build workflow
+    (see .github/workflows/poc-harness-build.yml, a separate, additive workflow).
+    Vendored here only so GitHub Actions can compile it with the .NET 10 SDK,
+    which was not available on the requesting machine. Does not modify
+    BotController's own implementation.
+
+    CI-specific change from the harness's original form: references
+    BotControllerApi via a ProjectReference to this repo's own
+    csharp/BotControllerApi project (pure C# interface, no native code) instead
+    of a local HintPath to a pre-extracted DLL, so the build is self-contained
+    and reproducible from a fresh checkout.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>BotControllerPocHarness</AssemblyName>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.375">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Same assembly the target server's addons/counterstrikesharp/shared/BotControllerApi/
+      will hold -- built from this repo's own source at this same pinned commit,
+      not a separately-sourced copy. Private=false: the harness does not vendor or
+      redistribute BotController's own AGPL-3.0 code, it only references its
+      published interface assembly, same interop shape CS2-Smarter-Bot uses
+      (PluginCapability lookup), not source inclusion.
+    -->
+    <ProjectReference Include="..\..\csharp\BotControllerApi\BotControllerApi.csproj">
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+</Project>
