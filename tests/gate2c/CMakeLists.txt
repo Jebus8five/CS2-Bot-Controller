@@ -28,8 +28,17 @@ add_executable(gate2c_lifecycle_test
 
 target_include_directories(gate2c_lifecycle_test PRIVATE
     "${BC_ROOT}/src/features/recorder"
-    "${BC_ROOT}/src/core"
+    "${BC_ROOT}/src"
 )
+# NOTE: the second path above must be src (not src/core): both
+# Gate2CDiagnostics.cpp and gate2c_lifecycle_test.cpp write
+# #include "core/log.h" (a path prefixed with "core/"), so the include
+# search needs the PARENT of src/core on its path, not src/core itself.
+# src/core/log.h is the real, unmodified production declarations header
+# (Level enum, Init/Close/Write signatures, BC_LOG_* macros) -- only its
+# spdlog-backed .cpp implementation is intentionally left uncompiled
+# here; gate2c_lifecycle_test.cpp supplies its own stub definitions of
+# Init/Close/Write matching that exact declared API instead.
 
 find_package(Threads REQUIRED)
 target_link_libraries(gate2c_lifecycle_test PRIVATE Threads::Threads)
