@@ -3,6 +3,7 @@
 #include "dispatch.h"
 #include "MotionRecorder.h"
 #include "InputInjector.h"
+#include "Gate2BDiagnostics.h"
 #include "BuyControllerState.h"
 #include "BotProfile.h"
 #include "VoiceSender.h"
@@ -60,6 +61,39 @@ extern "C" BC_EXPORT int BotController_UpdateUsercmdMovement(int slot, int64_t m
 extern "C" BC_EXPORT int BotController_CancelUsercmdMovement(int slot, int64_t movementId)
 {
     return cs2bc::input_injector::CancelUsercmdMovement(slot, movementId) ? 0 : -1;
+}
+
+// ---- Gate 2B diagnostic-only exports. Not part of the production HOS API:
+// these never change gameplay, movement, or hook semantics -- they only
+// start/stop bounded, read-only observation of calls the existing hooks
+// already make. The PoC harness owns the whole test lifecycle and is the
+// only intended caller of these three.
+
+// Begins a fresh bounded diagnostic capture window for this slot. Returns
+// cs2bc::gate2b::kStatusOk (0), kStatusInvalidSlot (2), or kStatusBusy (3) if
+// a previous window's writers could not be confirmed drained in time -- in
+// that case nothing was reset and the caller should retry rather than
+// assume a fresh window started.
+extern "C" BC_EXPORT int BotController_Gate2BDiagnosticStart(int slot)
+{
+    return cs2bc::gate2b::DiagnosticStart(slot);
+}
+
+// Marks that HOS movement injection has been cancelled for this slot, for
+// diagnostic phase classification only. Call this immediately after
+// BotController_CancelUsercmdMovement. Does not stop capture or dump anything.
+extern "C" BC_EXPORT int BotController_Gate2BDiagnosticMarkCancelled(int slot)
+{
+    cs2bc::gate2b::DiagnosticMarkCancelled(slot);
+    return 0;
+}
+
+// Stops capture and emits the bounded summary via the existing log sink.
+// aborted!=0 labels the summary PARTIAL/ABORTED instead of COMPLETE.
+// Safe to call more than once; a repeat call re-emits the same frozen result.
+extern "C" BC_EXPORT int BotController_Gate2BDiagnosticFinalize(int slot, int aborted)
+{
+    return cs2bc::gate2b::DiagnosticFinalize(slot, aborted);
 }
 
 // Cancel one usercmd injection by its token

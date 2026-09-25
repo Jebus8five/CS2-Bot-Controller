@@ -67,6 +67,19 @@ public sealed class PocHarnessPlugin : BasePlugin
     [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
     private static extern int BotController_GetVersion();
 
+    // ---- Gate 2B diagnostic-only exports (native, read-only observation).
+    // Not part of IBotControllerApi/BotControllerApi.dll -- these three are
+    // new, dedicated-diagnostic native exports, called only from this
+    // disposable harness, never touching gameplay/movement semantics.
+    [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int BotController_Gate2BDiagnosticStart(int slot);
+
+    [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int BotController_Gate2BDiagnosticMarkCancelled(int slot);
+
+    [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int BotController_Gate2BDiagnosticFinalize(int slot, int aborted);
+
     public override void Load(bool hotReload)
     {
         _logPath = Path.Combine(ModuleDirectory, "poc-harness.log");
@@ -196,16 +209,37 @@ public sealed class PocHarnessPlugin : BasePlugin
             : $"[gate2] PRE read FAILED: {detailPre} -- aborting, cannot establish baseline");
         if (!okPre) return;
 
+        // Gate 2B: begin native diagnostic capture BEFORE Lock/StartUsercmdMovement,
+        // so Activation is captured from the very first relevant call. This harness
+        // remains the sole owner of the test deadline/lifecycle; the native side only
+        // records observations of calls that already happen.
+        System.Threading.Interlocked.Exchange(ref _gate2FinalizedGuard, 0); // new test, new finalize claim
+        int startStatus;
+        try { startStatus = BotController_Gate2BDiagnosticStart(slot); }
+        catch (Exception ex) { startStatus = -1; Log($"[gate2] DiagnosticStart threw {ex.GetType().Name}: {ex.Message} -- proceeding without native diagnostics"); }
+        if (startStatus == 3) Log("[gate2] DiagnosticStart returned BUSY (a previous window's writers could not be confirmed drained) -- this run's native diagnostic will be unreliable; consider retrying.");
+
         bool locked;
         try { locked = api.Lock(slot, lockKind); }
-        catch (Exception ex) { Log($"[gate2] Lock threw {ex.GetType().Name}: {ex.Message}"); return; }
+        catch (Exception ex) { Log($"[gate2] Lock threw {ex.GetType().Name}: {ex.Message}"); TryFinalizeGate2Diagnostic(slot, aborted: true); return; }
         Log($"[gate2] Lock({lockKind}) accepted={locked} (per BotControllerApi/Types.cs: All freezes CCSBot::Update AND Upkeep, Aim freezes only Upkeep -- acceptance only, not proof it held)");
 
         long movementId;
         try { movementId = api.StartUsercmdMovement(slot, forwardMove: 1.0f, leftMove: 0.0f); }
-        catch (Exception ex) { Log($"[gate2] StartUsercmdMovement threw {ex.GetType().Name}: {ex.Message}"); if (locked) api.Unlock(slot, lockKind); return; }
+        catch (Exception ex)
+        {
+            Log($"[gate2] StartUsercmdMovement threw {ex.GetType().Name}: {ex.Message}");
+            if (locked) api.Unlock(slot, lockKind);
+            TryFinalizeGate2Diagnostic(slot, aborted: true);
+            return;
+        }
         Log($"[gate2] StartUsercmdMovement accepted, id={movementId} (id<0 or ==-1 conventionally means rejected -- treat as such, not as success)");
-        if (movementId < 0) { if (locked) api.Unlock(slot, lockKind); return; }
+        if (movementId < 0)
+        {
+            if (locked) api.Unlock(slot, lockKind);
+            TryFinalizeGate2Diagnostic(slot, aborted: true);
+            return;
+        }
         _activeMovement[slot] = movementId;
 
         // Bounded sampling loop: one sample per server tick for the requested
@@ -226,6 +260,16 @@ public sealed class PocHarnessPlugin : BasePlugin
     private LockKind _gate2LockKind;
     private long _gate2DeadlineMs;
 
+    // Gate 2B: bounded post-cancel observation, still locked, owned entirely by
+    // this harness's own wall-clock schedule -- independent of whether any
+    // native hook fires during it, so a fully-suppressed bot (the exact
+    // condition under investigation) still produces a timely, meaningful result
+    // instead of an indefinite wait.
+    private const long Gate2PostCancelDurationMs = 1000;
+    private readonly List<(long tMs, float x, float y, float z, float pitch, float yaw)> _gate2PostCancelSamples = new();
+    private bool _gate2PostCancelActive;
+    private long _gate2PostCancelDeadlineMs;
+
     private static long MonotonicMs() => Environment.TickCount64;
 
     public override void OnAllPluginsLoaded(bool hotReload)
@@ -242,7 +286,17 @@ public sealed class PocHarnessPlugin : BasePlugin
             if (MonotonicMs() >= _gate2DeadlineMs)
             {
                 _gate2Active = false;
-                FinishGate2();
+                BeginGate2PostCancel();
+            }
+        }
+        if (_gate2PostCancelActive && _gate2Pawn is not null)
+        {
+            var (ok, origin, eye, _) = ReadPawnState(_gate2Pawn);
+            if (ok) _gate2PostCancelSamples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z, eye!.X, eye.Y));
+            if (MonotonicMs() >= _gate2PostCancelDeadlineMs)
+            {
+                _gate2PostCancelActive = false;
+                FinishGate2(aborted: false);
             }
         }
         if (_gate3Active && _gate3Pawn is not null)
@@ -257,14 +311,65 @@ public sealed class PocHarnessPlugin : BasePlugin
         }
     }
 
-    private void FinishGate2()
+    // Cancels HOS movement, marks the native diagnostic phase transition, and
+    // begins the bounded still-locked post-cancel observation window. Capture
+    // stays active throughout -- CancelUsercmdMovement must not, by itself,
+    // stop or finalize the diagnostic.
+    private void BeginGate2PostCancel()
     {
         var api = BotControllerCap.Get();
         if (api is not null && _activeMovement.TryGetValue(_gate2Slot, out var id))
         {
             try { api.CancelUsercmdMovement(_gate2Slot, id); } catch { /* diagnostic-only, fail soft */ }
         }
-        Log($"[gate2] sample count={_gate2Samples.Count} lockKind={_gate2LockKind}");
+        try { BotController_Gate2BDiagnosticMarkCancelled(_gate2Slot); }
+        catch (Exception ex) { Log($"[gate2] DiagnosticMarkCancelled threw {ex.GetType().Name}: {ex.Message}"); }
+
+        _gate2PostCancelSamples.Clear();
+        _gate2PostCancelDeadlineMs = MonotonicMs() + Gate2PostCancelDurationMs;
+        _gate2PostCancelActive = true;
+        Log($"[gate2] movement cancelled; observing for {Gate2PostCancelDurationMs}ms while lockKind={_gate2LockKind} remains active before unlock");
+    }
+
+    // Single-owner guard so that only the winning finalize path (whichever of
+    // OnGate2's early returns, FinishGate2's normal completion, or OnStop's
+    // emergency abort runs first) ever emits a COMPLETE/ABORTED result for a
+    // given test; a losing path logs that it lost instead of printing a
+    // possibly-contradictory label. Reset at the start of each new
+    // css_poc_gate2 invocation (see OnGate2's DiagnosticStart call).
+    private int _gate2FinalizedGuard;
+
+    // Finalizes the native diagnostic exactly once (via the guard above) and
+    // logs the outcome, including native BUSY/INCOMPLETE status accurately.
+    private void TryFinalizeGate2Diagnostic(int slot, bool aborted)
+    {
+        if (System.Threading.Interlocked.CompareExchange(ref _gate2FinalizedGuard, 1, 0) != 0)
+        {
+            Log("[gate2] finalize already claimed by another code path for this test -- skipping a duplicate, potentially contradictory local summary.");
+            return;
+        }
+        int finalizeStatus;
+        try { finalizeStatus = BotController_Gate2BDiagnosticFinalize(slot, aborted ? 1 : 0); }
+        catch (Exception ex) { finalizeStatus = -1; Log($"[gate2] DiagnosticFinalize threw {ex.GetType().Name}: {ex.Message}"); }
+        string label = finalizeStatus switch
+        {
+            0 => aborted ? "ABORTED" : "COMPLETE",
+            1 => "REPEAT (native side already finalized this window independently)",
+            2 => "INVALID_SLOT",
+            3 => "BUSY/INCOMPLETE (native bounded drain did not confirm quiescence -- buffers were NOT read; do not treat this as a completed test)",
+            _ => $"UNKNOWN(status={finalizeStatus})",
+        };
+        Log($"[gate2] [{label}] DiagnosticFinalize status={finalizeStatus} -- see native BotController log for the bounded per-phase sample dump (Activation/SteadyState/Cancellation/PostCancel) and invocation counters, when status=0 or 1.");
+    }
+
+    // Logs both sample windows and releases the lock(s) after finalizing the
+    // native diagnostic. aborted=true labels this an emergency-abort result
+    // (see OnStop) rather than a normally-completed Gate 2B run.
+    private void FinishGate2(bool aborted)
+    {
+        TryFinalizeGate2Diagnostic(_gate2Slot, aborted);
+
+        Log($"[gate2] pre-cancel sample count={_gate2Samples.Count} lockKind={_gate2LockKind}");
         foreach (var s in _gate2Samples)
             Log($"[gate2] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4})");
         if (_gate2Samples.Count >= 2)
@@ -272,14 +377,43 @@ public sealed class PocHarnessPlugin : BasePlugin
             var first = _gate2Samples[0]; var last = _gate2Samples[^1];
             var dist = MathF.Sqrt(MathF.Pow(last.x - first.x, 2) + MathF.Pow(last.y - first.y, 2) + MathF.Pow(last.z - first.z, 2));
             var eyeDelta = MathF.Sqrt(MathF.Pow(last.pitch - first.pitch, 2) + MathF.Pow(last.yaw - first.yaw, 2));
-            Log($"[gate2] net displacement over window: {dist:F4} units, net eye-angle change: {eyeDelta:F4} deg (lockKind={_gate2LockKind}). Continuity must be assessed from the full per-sample trace above (monotonic-ish progress, no single-sample teleport jump), not from this net figure alone. Under lockKind=All, ANY eye-angle change here would itself be a finding (Upkeep is meant to be frozen too); under lockKind=Aim, eye-angle drift is expected (Upkeep runs normally) -- only the requested StartUsercmdMovement's forward displacement is under test.");
+            Log($"[gate2] net displacement over pre-cancel window: {dist:F4} units, net eye-angle change: {eyeDelta:F4} deg (lockKind={_gate2LockKind}). Continuity must be assessed from the full per-sample trace above (monotonic-ish progress, no single-sample teleport jump), not from this net figure alone. Under lockKind=All, ANY eye-angle change here would itself be a finding (Upkeep is meant to be frozen too); under lockKind=Aim, eye-angle drift is expected (Upkeep runs normally) -- only the requested StartUsercmdMovement's forward displacement is under test.");
         }
-        // Acceptance criteria, corrected post-restart: "AI suppression worked" is
-        // judged ONLY from the sampled window above, while Lock(All) was active.
-        // css_poc_stop (or gate self-expiry without a re-lock) deliberately releases
-        // the lock; the bot resuming ordinary CCSBot AI behavior afterward is the
-        // CORRECT, expected outcome and must never be scored as an interference
-        // failure or as evidence suppression didn't work.
+
+        Log($"[gate2] post-cancel (still locked) sample count={_gate2PostCancelSamples.Count}");
+        foreach (var s in _gate2PostCancelSamples)
+            Log($"[gate2] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4})");
+        if (_gate2PostCancelSamples.Count == 0)
+        {
+            Log("[gate2] post-cancel window produced no position samples (e.g. pawn became unreadable) -- record this as a diagnostic result, not evidence of a stuck command.");
+        }
+        else if (_gate2PostCancelSamples.Count >= 2)
+        {
+            // Distinguish decaying residual momentum (acceptable) from persistent
+            // injected input (not acceptable): compare successive per-sample
+            // displacement, not just first-vs-last. A monotonically shrinking
+            // step size is consistent with momentum decay; a step size that
+            // stays flat or grows across the whole post-cancel window is not,
+            // and must not be waved away as "residual physical velocity."
+            var steps = new List<float>();
+            for (int i = 1; i < _gate2PostCancelSamples.Count; i++)
+            {
+                var a = _gate2PostCancelSamples[i - 1];
+                var b = _gate2PostCancelSamples[i];
+                steps.Add(MathF.Sqrt(MathF.Pow(b.x - a.x, 2) + MathF.Pow(b.y - a.y, 2) + MathF.Pow(b.z - a.z, 2)));
+            }
+            var firstStep = steps[0];
+            var lastStep = steps[^1];
+            Log($"[gate2] post-cancel per-sample step size: first={firstStep:F5} last={lastStep:F5} (decreasing or near-zero is consistent with decaying residual momentum; flat-or-increasing across this whole window is NOT and must be treated as unexplained continued motion, not residual velocity).");
+        }
+
+        var api = BotControllerCap.Get();
+        if (api is not null)
+        {
+            try { api.Unlock(_gate2Slot, LockKind.All); } catch { /* diagnostic-only, fail soft */ }
+            try { api.Unlock(_gate2Slot, LockKind.Aim); } catch { /* diagnostic-only, fail soft */ }
+        }
+        Log($"[gate2] unlocked slot={_gate2Slot}. Acceptance criteria: 'AI suppression worked' is judged ONLY from the pre-cancel and post-cancel-still-locked windows above; the bot resuming ordinary CCSBot AI behavior AFTER this unlock is the CORRECT, expected outcome and must never be scored as an interference failure.");
     }
 
     // ---- GATE 3: DISABLED post-restart. See README "Gate 3 disabled" section for
@@ -413,13 +547,27 @@ public sealed class PocHarnessPlugin : BasePlugin
     }
     private int _lastGate3Slot; // set in OnGate3 alongside _gate3Pawn (kept explicit rather than inferred from pawn to avoid a stale-pointer footgun)
 
+    // Emergency abort: immediate, bounded, never waits on further physics or
+    // usercmd calls. Finalizes any active Gate 2B diagnostic as ABORTED before
+    // releasing locks, so a partial capture is never mistaken for a completed
+    // Gate 2B run (see FinishGate2's [ABORTED]/[COMPLETE] labeling).
     [ConsoleCommand("css_poc_stop", "Cancel all PoC harness activity for a slot")]
     [CommandHelper(minArgs: 1, usage: "<slot>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnStop(CCSPlayerController? caller, CommandInfo cmd)
     {
         if (!int.TryParse(cmd.GetArg(1), out var slot)) { Log("[stop] bad slot arg"); return; }
         var api = BotControllerCap.Get();
-        _gate2Active = false; _gate3Active = false;
+        bool wasGate2Active = _gate2Active || _gate2PostCancelActive;
+        _gate2Active = false; _gate2PostCancelActive = false; _gate3Active = false;
+
+        if (wasGate2Active || slot == _gate2Slot)
+        {
+            // Routed through the same single-owner guard as FinishGate2/OnGate2's
+            // early returns, so this can never emit a result that contradicts
+            // whichever path actually wins the race to finalize.
+            TryFinalizeGate2Diagnostic(slot, aborted: true);
+        }
+
         if (api is null) { Log("[stop] capability unavailable, nothing to cancel via API (local sampling state cleared)"); return; }
         try
         {

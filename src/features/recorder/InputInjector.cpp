@@ -14,6 +14,7 @@
 #include "ccsbot_slot.h"
 #include "core/memory_module.h"
 #include "MotionRecorder.h"
+#include "Gate2BDiagnostics.h"
 #include "usercmd.pb.h"
 #include "offsets.h"
 #include "hooks.h"
@@ -26,6 +27,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <vector> // NOLINT(misc-include-cleaner)
@@ -459,22 +461,53 @@ void ApplyReplayDrop(int slot, void* services)
 // Installs the command hook from the live movement-services vtable.
 void EnsureVtableHooks(void* services);
 
+// Returns the enclosing simulation boundary for this player.
+MovementFrame* FindPhysicsFrame(int slot);
+
 // Discovers live services without modifying any substep simulation state.
-KHook::Return<void> HookedProcessMovement(void* services, void*) noexcept
+// Gate 2B diagnostic addition: the second parameter is CMoveData* -- its
+// identity was independently verified this session via its own +0x2C/+0x30/
+// +0xC8 data flow (the engine's own "forward %f" debug string and the
+// wishdir basis-vector math), not merely inferred from argument position.
+// This remains a KHook pre-hook (per hooks.h's Install(target, pre, post)
+// naming and KHook's own documented Ignore/Supercede semantics): it runs
+// before the original ProcessMovement body, and returning Ignore here does
+// not by itself prove the original subsequently executed -- KHook is a
+// centralized, multi-consumer detouring system, and a PRE callback firing is
+// not documented as 1:1 with the original's execution. The counters added
+// below are therefore labeled "this hook was reached," never "the original
+// ran." Only reads are added; nothing here writes CMoveData.
+KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexcept
 {
     EnsureVtableHooks(services);
     void* validatedPawn = nullptr;
     int slot = pawn_binding::ServicesToSlot(services, &validatedPawn);
+    gate2b::RecordProcessMovementEntry(slot); // unconditional; safe even if slot<0
+
     if (slot >= 0 && slot < kMaxSlots)
     {
         g_slotServices[slot].store(services, std::memory_order_release);
         if (motion_recorder::IsRecording(slot))
             motion_recorder::SetLiveWs(slot, pawn_binding::ServicesToWeaponServices(slot, services, validatedPawn));
+
+        if (moveData != nullptr)
+        {
+            const auto* base = static_cast<const uint8_t*>(moveData);
+            float forwardMove, sideMove, velX, velY, velZ;
+            std::memcpy(&forwardMove, base + 0x2C, sizeof(float));
+            std::memcpy(&sideMove, base + 0x30, sizeof(float));
+            std::memcpy(&velX, base + 0x38, sizeof(float));
+            std::memcpy(&velY, base + 0x3C, sizeof(float));
+            std::memcpy(&velZ, base + 0x40, sizeof(float));
+
+            gate2b::RecordProcessMovementObservation(slot, gate2b::CurrentPhysicsSimulateSeq(slot),
+                                                       MonotonicMilliseconds(), forwardMove, sideMove, velX, velY,
+                                                       velZ);
+        }
     }
     return { KHook::Action::Ignore };
 }
 
-// Returns the enclosing simulation boundary for this player.
 MovementFrame* FindPhysicsFrame(int slot)
 {
     if (slot < 0 || slot >= kMaxSlots) return nullptr;
@@ -643,16 +676,44 @@ void ApplyReplayUserCommand(int slot, void* services, PlayerCommand* pc, CBaseUs
 }
 
 // Records or injects the user command before native simulation.
+// Gate 2B diagnostic addition: same pre-hook caveat as HookedProcessMovement
+// above -- reaching this function is not proof the original PlayerRunCommand
+// subsequently ran. Only reads are added around the existing logic; nothing
+// below this comment changes what the existing code does.
 KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 {
     int slot = pawn_binding::ServicesToSlot(services);
+    gate2b::RecordPlayerRunCommandEntry(slot, cmd != nullptr); // unconditional; safe even if slot<0 or cmd==nullptr
+
     auto* boundary = FindPhysicsFrame(slot);
     bool recording = boundary && boundary->recording && motion_recorder::IsRecording(slot);
     bool replaying = boundary && boundary->replaying && motion_recorder::IsReplaying(slot);
     const auto [hasUsercmdInjection, hasUsercmdSuppression, hasUsercmdMovement] = replaying ? UsercmdWork{} : GetUsercmdWork(slot);
 
-    if (cmd && (recording || replaying || hasUsercmdInjection || hasUsercmdSuppression || hasUsercmdMovement))
+    if (cmd == nullptr)
     {
+        return { KHook::Action::Ignore };
+    }
+
+    // Gate 2B diagnostic "before" snapshot: read-only, deliberately outside
+    // and independent of the production gate below, so a call where every
+    // production flag is false (the expected state immediately after
+    // CancelUsercmdMovement) is still observed. has_base()/base() are the
+    // same const, non-mutating accessor pair this file already relies on
+    // for every sibling optional field (see has_forwardmove/has_leftmove/
+    // has_upmove/has_viewangles/has_mousedx/has_mousedy a few lines below in
+    // CaptureUserCommand) -- base() returns a reference to the default
+    // instance without allocating when has_base() is false, so this can
+    // never mutate the command the way mutable_base() would.
+    const auto* pcConst = reinterpret_cast<const PlayerCommand*>(cmd);
+    const bool hasBaseBefore = pcConst->has_base();
+    const float fwdBefore = hasBaseBefore ? pcConst->base().forwardmove() : 0.0f;
+    const float sideBefore = hasBaseBefore ? pcConst->base().leftmove() : 0.0f;
+    const int subtickBefore = hasBaseBefore ? pcConst->base().subtick_moves_size() : 0;
+
+    if (recording || replaying || hasUsercmdInjection || hasUsercmdSuppression || hasUsercmdMovement)
+    {
+        // Exact existing production branch, unchanged.
         // Compiler computes the multiple-inheritance adjust here.
         auto* pc = reinterpret_cast<PlayerCommand*>(cmd);
         CBaseUserCmdPB* base = pc->mutable_base();
@@ -665,6 +726,19 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
         if (hasUsercmdInjection && !replaying) ApplyUsercmdInjections(slot, pc, base);
         if (hasUsercmdMovement && !replaying) ApplyUsercmdMovement(slot, pc, base);
     }
+
+    // Gate 2B diagnostic "after" snapshot: still read-only. If the production
+    // branch ran, base is now guaranteed present and this reads the same
+    // (already-mutated-by-the-production-code, not by us) submessage through
+    // the const accessor; if it didn't run, nothing touched the command, so
+    // these equal the "before" values by construction.
+    const bool hasBaseAfter = pcConst->has_base();
+    const float fwdAfter = hasBaseAfter ? pcConst->base().forwardmove() : 0.0f;
+    const float sideAfter = hasBaseAfter ? pcConst->base().leftmove() : 0.0f;
+
+    gate2b::RecordPlayerRunCommandObservation(slot, gate2b::CurrentPhysicsSimulateSeq(slot), MonotonicMilliseconds(),
+                                                pcConst->cmdNum, hasUsercmdMovement, hasBaseBefore, fwdBefore,
+                                                sideBefore, fwdAfter, sideAfter, subtickBefore);
 
     return { KHook::Action::Ignore };
 }
@@ -701,6 +775,20 @@ void EnsureControllerCommandHook(void* controller)
 KHook::Return<void> HookedPhysicsSimulate(void* controller) noexcept
 {
     EnsureControllerCommandHook(controller);
+
+    // Gate 2B diagnostic only: an always-incrementing per-slot call counter,
+    // independent of the recording/replay gate immediately below (which
+    // stays completely unmodified). The existing frame push/pop mechanism
+    // below only creates a real, slot-stamped frame when recording or replay
+    // is active -- never true during Gate 2B -- so it cannot serve as a
+    // correlation identifier for this diagnostic; this counter replaces that
+    // role. It is a LOCAL CALL-SEQUENCE NUMBER (the Nth time this hook fired
+    // for this slot since the current diagnostic window began), not the
+    // engine's own tick counter, and does not assume one call equals one
+    // engine tick. ControllerToSlot is the same read-only helper already
+    // called a few lines below for the existing, unmodified logic.
+    gate2b::RecordPhysicsSimulateCall(ControllerToSlot(controller));
+
     if (!motion_recorder::HasAnyRecording() && !motion_recorder::HasAnyReplay())
     {
         // Keep the matching post callback from consuming an outer frame.
