@@ -4,6 +4,7 @@
 #include "MotionRecorder.h"
 #include "InputInjector.h"
 #include "Gate2BDiagnostics.h"
+#include "Gate2CDiagnostics.h"
 #include "BuyControllerState.h"
 #include "BotProfile.h"
 #include "VoiceSender.h"
@@ -94,6 +95,36 @@ extern "C" BC_EXPORT int BotController_Gate2BDiagnosticMarkCancelled(int slot)
 extern "C" BC_EXPORT int BotController_Gate2BDiagnosticFinalize(int slot, int aborted)
 {
     return cs2bc::gate2b::DiagnosticFinalize(slot, aborted);
+}
+
+// Gate 2C: diagnostic-only ProcessMovement-direct-write experiment, fully
+// independent of Gate2B above (separate state, separate buffers). Disabled
+// by default -- only active for a slot between this Start and its Finalize.
+// writeScale is required and explicit: the caller must supply the
+// multiplier applied to the shared movement intent before it is written to
+// CMoveData; there is no built-in default such as the legacy usercmd 450
+// scale. Same status codes as Gate2B's Start/Finalize.
+extern "C" BC_EXPORT int BotController_Gate2CDiagnosticStart(int slot, float writeScale)
+{
+    return cs2bc::gate2c::Start(slot, writeScale);
+}
+
+// Marks that the shared movement intent has been (or is about to be)
+// cancelled for this slot, for Gate2C phase classification only. Call
+// immediately after BotController_CancelUsercmdMovement, same as Gate2B's
+// MarkCancelled.
+extern "C" BC_EXPORT int BotController_Gate2CDiagnosticMarkCancelled(int slot)
+{
+    cs2bc::gate2c::MarkCancelled(slot);
+    return 0;
+}
+
+// Stops Gate2C capture and emits the bounded summary via the existing log
+// sink. aborted!=0 labels the summary PARTIAL/ABORTED instead of COMPLETE.
+// Safe to call more than once.
+extern "C" BC_EXPORT int BotController_Gate2CDiagnosticFinalize(int slot, int aborted)
+{
+    return cs2bc::gate2c::Finalize(slot, aborted);
 }
 
 // Cancel one usercmd injection by its token

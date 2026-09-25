@@ -22,6 +22,13 @@
 //   css_poc_baseline <slot>                 -- log current AbsOrigin/EyeAngles for slot
 //   css_poc_gate2 <slot> <ms> [lockMode]     -- suppress AI (lockMode: all|aim, default all),
 //                                                inject forward movement, sample position+eye
+//   css_poc_gate2c <slot> <ms> <writeScale> [lockMode] -- like gate2, but ALSO starts the Gate2C
+//                                                native diagnostic, which additionally writes the
+//                                                same movement intent directly into CMoveData
+//                                                inside the ProcessMovement pre-hook. writeScale
+//                                                is required and explicit -- there is no default;
+//                                                see Gate2CDiagnostics.h for why 450 must not be
+//                                                assumed and 1.0 is not asserted as established.
 //   css_poc_gate3 <slot> <pitch> <yaw> <ms>  -- DISABLED, see comment above OnGate3 and README
 //   css_poc_stop <slot>                     -- cancel all injections/locks/replay for slot, unlock
 
@@ -79,6 +86,20 @@ public sealed class PocHarnessPlugin : BasePlugin
 
     [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
     private static extern int BotController_Gate2BDiagnosticFinalize(int slot, int aborted);
+
+    // ---- Gate 2C diagnostic-only exports (native, ProcessMovement-direct-write
+    // experiment). Independent of the Gate 2B exports above -- separate native
+    // state, separate buffers, separate finalize guard below. writeScale has no
+    // default in the native layer (see Gate2CDiagnostics.h); this harness
+    // requires it as an explicit console-command argument for the same reason.
+    [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int BotController_Gate2CDiagnosticStart(int slot, float writeScale);
+
+    [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int BotController_Gate2CDiagnosticMarkCancelled(int slot);
+
+    [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int BotController_Gate2CDiagnosticFinalize(int slot, int aborted);
 
     public override void Load(bool hotReload)
     {
@@ -309,6 +330,26 @@ public sealed class PocHarnessPlugin : BasePlugin
                 FinishGate3();
             }
         }
+        if (_gate2cActive && _gate2cPawn is not null)
+        {
+            var (ok, origin, eye, _) = ReadPawnState(_gate2cPawn);
+            if (ok) _gate2cSamples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z, eye!.X, eye.Y));
+            if (MonotonicMs() >= _gate2cDeadlineMs)
+            {
+                _gate2cActive = false;
+                BeginGate2CPostCancel();
+            }
+        }
+        if (_gate2cPostCancelActive && _gate2cPawn is not null)
+        {
+            var (ok, origin, eye, _) = ReadPawnState(_gate2cPawn);
+            if (ok) _gate2cPostCancelSamples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z, eye!.X, eye.Y));
+            if (MonotonicMs() >= _gate2cPostCancelDeadlineMs)
+            {
+                _gate2cPostCancelActive = false;
+                FinishGate2C(aborted: false);
+            }
+        }
     }
 
     // Cancels HOS movement, marks the native diagnostic phase transition, and
@@ -414,6 +455,239 @@ public sealed class PocHarnessPlugin : BasePlugin
             try { api.Unlock(_gate2Slot, LockKind.Aim); } catch { /* diagnostic-only, fail soft */ }
         }
         Log($"[gate2] unlocked slot={_gate2Slot}. Acceptance criteria: 'AI suppression worked' is judged ONLY from the pre-cancel and post-cancel-still-locked windows above; the bot resuming ordinary CCSBot AI behavior AFTER this unlock is the CORRECT, expected outcome and must never be scored as an interference failure.");
+    }
+
+    // ---- GATE 2C: like GATE2 above (unmodified), but ALSO starts the Gate2C
+    // native diagnostic, which additionally writes the same shared movement
+    // intent directly into CMoveData inside the ProcessMovement pre-hook and
+    // records PRE/INJECTED/POST for each invocation. Runs its OWN Gate2B
+    // window too (via the existing, unmodified TryFinalizeGate2Diagnostic/
+    // _gate2FinalizedGuard), so one test produces directly comparable Gate2B
+    // and Gate2C native logs. Entirely separate state/fields from css_poc_gate2
+    // above -- that command is untouched.
+    [ConsoleCommand("css_poc_gate2c", "GATE2C: like GATE2, but also writes movement directly into CMoveData in ProcessMovement (diagnostic-only, explicit writeScale)")]
+    [CommandHelper(minArgs: 3, usage: "<slot> <durationMs> <writeScale> [lockMode: all|aim, default all]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnGate2C(CCSPlayerController? caller, CommandInfo cmd)
+    {
+        if (!int.TryParse(cmd.GetArg(1), out var slot) || !int.TryParse(cmd.GetArg(2), out var durationMs))
+        { Log("[gate2c] bad slot/durationMs args"); return; }
+        if (!float.TryParse(cmd.GetArg(3), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var writeScale))
+        {
+            Log("[gate2c] bad writeScale arg -- must be a number, e.g. 1.0. This is NOT defaulted (see " +
+                "Gate2CDiagnostics.h): the caller must state the value under test explicitly, and neither " +
+                "450 nor 1.0 is asserted here as an established CMoveData unit.");
+            return;
+        }
+
+        var lockModeArg = cmd.GetArg(4);
+        LockKind lockKind;
+        if (string.IsNullOrWhiteSpace(lockModeArg) || lockModeArg.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            lockKind = LockKind.All;
+        }
+        else if (lockModeArg.Equals("aim", StringComparison.OrdinalIgnoreCase))
+        {
+            lockKind = LockKind.Aim;
+        }
+        else
+        {
+            Log($"[gate2c] bad lockMode arg '{lockModeArg}' -- must be 'all' or 'aim' (omit for default 'all')");
+            return;
+        }
+
+        var api = BotControllerCap.Get();
+        if (api is null) { Log("[gate2c] FAIL: capability not available (run gate1 first)"); return; }
+        var controller = ResolveSlot(slot);
+        if (controller is null || !controller.IsBot) { Log($"[gate2c] slot {slot} is not a live bot"); return; }
+        var pawn = controller.PlayerPawn?.Value;
+        if (pawn is null) { Log($"[gate2c] slot {slot} has no pawn"); return; }
+
+        var (okPre, originPre, eyePre, detailPre) = ReadPawnState(pawn);
+        Log(okPre
+            ? $"[gate2c] PRE origin=({originPre!.X:F4},{originPre.Y:F4},{originPre.Z:F4}) eye=({eyePre!.X:F4},{eyePre.Y:F4})"
+            : $"[gate2c] PRE read FAILED: {detailPre} -- aborting, cannot establish baseline");
+        if (!okPre) return;
+
+        // Start Gate2B's window first (same non-fatal-on-failure behavior as
+        // css_poc_gate2 itself: Gate2C's own hypothesis does not depend on it),
+        // then Gate2C's own window, which IS fatal on failure -- writing
+        // CMoveData with no reliable native capture active would produce a
+        // result with no way to check it.
+        System.Threading.Interlocked.Exchange(ref _gate2FinalizedGuard, 0);
+        int startStatusB;
+        try { startStatusB = BotController_Gate2BDiagnosticStart(slot); }
+        catch (Exception ex) { startStatusB = -1; Log($"[gate2c] Gate2B DiagnosticStart threw {ex.GetType().Name}: {ex.Message} -- proceeding, Gate2B side of this run will be unreliable."); }
+        if (startStatusB == 3) Log("[gate2c] Gate2B DiagnosticStart returned BUSY -- Gate2B side of this run will be unreliable.");
+
+        System.Threading.Interlocked.Exchange(ref _gate2cFinalizedGuard, 0);
+        int startStatusC;
+        try { startStatusC = BotController_Gate2CDiagnosticStart(slot, writeScale); }
+        catch (Exception ex)
+        {
+            Log($"[gate2c] Gate2C DiagnosticStart threw {ex.GetType().Name}: {ex.Message} -- aborting.");
+            TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
+            return;
+        }
+        if (startStatusC != 0)
+        {
+            Log($"[gate2c] Gate2C DiagnosticStart returned status={startStatusC} (0=OK, 2=INVALID_SLOT, 3=BUSY) -- aborting rather than writing CMoveData with no reliable capture active.");
+            TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
+            return;
+        }
+        Log($"[gate2c] Gate2C capture started, writeScale={writeScale} (explicit, experimental).");
+
+        bool locked;
+        try { locked = api.Lock(slot, lockKind); }
+        catch (Exception ex)
+        {
+            Log($"[gate2c] Lock threw {ex.GetType().Name}: {ex.Message}");
+            TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
+            return;
+        }
+        Log($"[gate2c] Lock({lockKind}) accepted={locked}");
+
+        long movementId;
+        try { movementId = api.StartUsercmdMovement(slot, forwardMove: 1.0f, leftMove: 0.0f); }
+        catch (Exception ex)
+        {
+            Log($"[gate2c] StartUsercmdMovement threw {ex.GetType().Name}: {ex.Message}");
+            if (locked) api.Unlock(slot, lockKind);
+            TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
+            return;
+        }
+        Log($"[gate2c] StartUsercmdMovement accepted, id={movementId}");
+        if (movementId < 0)
+        {
+            if (locked) api.Unlock(slot, lockKind);
+            TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
+            return;
+        }
+        _activeMovement[slot] = movementId;
+
+        _gate2cSamples.Clear();
+        _gate2cSlot = slot;
+        _gate2cPawn = pawn;
+        _gate2cLockKind = lockKind;
+        _gate2cDeadlineMs = MonotonicMs() + durationMs;
+        _gate2cActive = true;
+        Log($"[gate2c] sampling started for {durationMs}ms with lockKind={lockKind}, writeScale={writeScale}. " +
+            $"Call css_poc_stop {slot} early if needed; otherwise it self-stops and logs the full trace.");
+    }
+
+    private readonly List<(long tMs, float x, float y, float z, float pitch, float yaw)> _gate2cSamples = new();
+    private bool _gate2cActive;
+    private int _gate2cSlot;
+    private CCSPlayerPawn? _gate2cPawn;
+    private LockKind _gate2cLockKind;
+    private long _gate2cDeadlineMs;
+
+    private readonly List<(long tMs, float x, float y, float z, float pitch, float yaw)> _gate2cPostCancelSamples = new();
+    private bool _gate2cPostCancelActive;
+    private long _gate2cPostCancelDeadlineMs;
+
+    // Cancels HOS movement, marks BOTH native diagnostics' phase transition,
+    // and begins the bounded still-locked post-cancel observation window --
+    // same structure as BeginGate2PostCancel (unmodified), duplicated rather
+    // than parameterized so css_poc_gate2's own path is never at risk of
+    // being altered by a Gate2C-motivated refactor.
+    private void BeginGate2CPostCancel()
+    {
+        var api = BotControllerCap.Get();
+        if (api is not null && _activeMovement.TryGetValue(_gate2cSlot, out var id))
+        {
+            try { api.CancelUsercmdMovement(_gate2cSlot, id); } catch { /* diagnostic-only, fail soft */ }
+        }
+        try { BotController_Gate2BDiagnosticMarkCancelled(_gate2cSlot); }
+        catch (Exception ex) { Log($"[gate2c] Gate2B DiagnosticMarkCancelled threw {ex.GetType().Name}: {ex.Message}"); }
+        try { BotController_Gate2CDiagnosticMarkCancelled(_gate2cSlot); }
+        catch (Exception ex) { Log($"[gate2c] Gate2C DiagnosticMarkCancelled threw {ex.GetType().Name}: {ex.Message}"); }
+
+        _gate2cPostCancelSamples.Clear();
+        _gate2cPostCancelDeadlineMs = MonotonicMs() + Gate2PostCancelDurationMs;
+        _gate2cPostCancelActive = true;
+        Log($"[gate2c] movement cancelled; observing for {Gate2PostCancelDurationMs}ms while lockKind={_gate2cLockKind} remains active before unlock");
+    }
+
+    private int _gate2cFinalizedGuard;
+
+    private void TryFinalizeGate2CDiagnostic(int slot, bool aborted)
+    {
+        if (System.Threading.Interlocked.CompareExchange(ref _gate2cFinalizedGuard, 1, 0) != 0)
+        {
+            Log("[gate2c] Gate2C finalize already claimed by another code path for this test -- skipping a duplicate, potentially contradictory local summary.");
+            return;
+        }
+        int finalizeStatus;
+        try { finalizeStatus = BotController_Gate2CDiagnosticFinalize(slot, aborted ? 1 : 0); }
+        catch (Exception ex) { finalizeStatus = -1; Log($"[gate2c] Gate2C DiagnosticFinalize threw {ex.GetType().Name}: {ex.Message}"); }
+        string label = finalizeStatus switch
+        {
+            0 => aborted ? "ABORTED" : "COMPLETE",
+            1 => "REPEAT (native side already finalized this window independently)",
+            2 => "INVALID_SLOT",
+            3 => "BUSY/INCOMPLETE (native bounded drain did not confirm quiescence -- buffers were NOT read; do not treat this as a completed test)",
+            _ => $"UNKNOWN(status={finalizeStatus})",
+        };
+        Log($"[gate2c] [{label}] Gate2C DiagnosticFinalize status={finalizeStatus} -- see native BotController log " +
+            "for the bounded PRE/INJECTED/POST sample dump (Activation/SteadyState/Cancellation/PostCancel) and " +
+            "pairing counters (overflow/unmatchedPost/orphanedFrames/staleGeneration), when status=0 or 1.");
+    }
+
+    // Finalizes BOTH the Gate2B and Gate2C native diagnostics for one
+    // css_poc_gate2c test, each through its own single-owner guard (the
+    // existing TryFinalizeGate2Diagnostic for Gate2B, unmodified; the new
+    // TryFinalizeGate2CDiagnostic above for Gate2C), so every exit path --
+    // normal completion, an early-return failure in OnGate2C, or an
+    // emergency css_poc_stop -- leaves both native diagnostics in a defined,
+    // logged state.
+    private void TryFinalizeBothGate2CDiagnostics(int slot, bool aborted)
+    {
+        TryFinalizeGate2Diagnostic(slot, aborted);
+        TryFinalizeGate2CDiagnostic(slot, aborted);
+    }
+
+    private void FinishGate2C(bool aborted)
+    {
+        TryFinalizeBothGate2CDiagnostics(_gate2cSlot, aborted);
+
+        Log($"[gate2c] pre-cancel sample count={_gate2cSamples.Count} lockKind={_gate2cLockKind}");
+        foreach (var s in _gate2cSamples)
+            Log($"[gate2c] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4})");
+        if (_gate2cSamples.Count >= 2)
+        {
+            var first = _gate2cSamples[0]; var last = _gate2cSamples[^1];
+            var dist = MathF.Sqrt(MathF.Pow(last.x - first.x, 2) + MathF.Pow(last.y - first.y, 2) + MathF.Pow(last.z - first.z, 2));
+            Log($"[gate2c] net displacement over pre-cancel window: {dist:F4} units (lockKind={_gate2cLockKind}). " +
+                "As with gate2, this net figure alone does not establish sustained movement -- inspect the native " +
+                "Gate2C log's per-invocation PRE/INJECTED/POST velocity and origin across the SteadyState phase " +
+                "specifically, not just this harness-side first/last displacement.");
+        }
+
+        Log($"[gate2c] post-cancel (still locked) sample count={_gate2cPostCancelSamples.Count}");
+        foreach (var s in _gate2cPostCancelSamples)
+            Log($"[gate2c] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4})");
+        if (_gate2cPostCancelSamples.Count >= 2)
+        {
+            var steps = new List<float>();
+            for (int i = 1; i < _gate2cPostCancelSamples.Count; i++)
+            {
+                var a = _gate2cPostCancelSamples[i - 1];
+                var b = _gate2cPostCancelSamples[i];
+                steps.Add(MathF.Sqrt(MathF.Pow(b.x - a.x, 2) + MathF.Pow(b.y - a.y, 2) + MathF.Pow(b.z - a.z, 2)));
+            }
+            Log($"[gate2c] post-cancel per-sample step size: first={steps[0]:F5} last={steps[^1]:F5} " +
+                "(decreasing or near-zero is consistent with decaying residual momentum; flat-or-increasing " +
+                "across this whole window is NOT and must be treated as unexplained continued motion).");
+        }
+
+        var api = BotControllerCap.Get();
+        if (api is not null)
+        {
+            try { api.Unlock(_gate2cSlot, LockKind.All); } catch { /* diagnostic-only, fail soft */ }
+            try { api.Unlock(_gate2cSlot, LockKind.Aim); } catch { /* diagnostic-only, fail soft */ }
+        }
+        Log($"[gate2c] unlocked slot={_gate2cSlot}.");
     }
 
     // ---- GATE 3: DISABLED post-restart. See README "Gate 3 disabled" section for
@@ -566,6 +840,19 @@ public sealed class PocHarnessPlugin : BasePlugin
             // early returns, so this can never emit a result that contradicts
             // whichever path actually wins the race to finalize.
             TryFinalizeGate2Diagnostic(slot, aborted: true);
+        }
+
+        // Gate 2C: separate active-state fields from css_poc_gate2's own
+        // (_gate2cActive/_gate2cSlot, not _gate2Active/_gate2Slot above), since
+        // a css_poc_gate2c run does not set the latter. Finalizes BOTH native
+        // diagnostics it started, through their own respective single-owner
+        // guards, so an emergency stop mid-Gate2C-run never leaves either
+        // native side un-finalized.
+        bool wasGate2cActive = _gate2cActive || _gate2cPostCancelActive;
+        _gate2cActive = false; _gate2cPostCancelActive = false;
+        if (wasGate2cActive || slot == _gate2cSlot)
+        {
+            TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
         }
 
         if (api is null) { Log("[stop] capability unavailable, nothing to cancel via API (local sampling state cleared)"); return; }
