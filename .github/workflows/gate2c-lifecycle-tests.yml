@@ -1,0 +1,33 @@
+name: Gate2C Lifecycle Tests
+
+# Manual only. This workflow builds and runs ONLY the standalone Gate2C
+# positional-pairing unit tests (tests/gate2c/gate2c_lifecycle_test.cpp,
+# via tests/gate2c/CMakeLists.txt) -- a self-contained CMake project with
+# zero CS2/HL2SDK/metamod-source/KHook/protobuf dependency (see that
+# test file's own top-of-file comment). It never touches, builds, or
+# packages the main BotController plugin (the top-level CMakeLists.txt
+# is never invoked here), never installs or launches CS2, and never
+# deploys anything to a server -- its only output is a pass/fail test
+# result plus the raw ctest log, both visible only in this run's own
+# Actions UI.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  gate2c-lifecycle-tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure (tests/gate2c only -- independent of the main plugin build)
+        run: cmake -S tests/gate2c -B build/gate2c-tests -A x64
+
+      - name: Build
+        run: cmake --build build/gate2c-tests --config Release
+
+      - name: Run standalone Gate2C lifecycle tests
+        run: ctest --test-dir build/gate2c-tests -C Release --output-on-failure

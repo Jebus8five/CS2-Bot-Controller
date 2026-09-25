@@ -69,85 +69,26 @@ struct MovementFrame
 };
 thread_local std::vector<MovementFrame> g_physicsFrames;
 
-// Gate 2C: one pending ProcessMovement invocation's PRE+INJECTED data,
-// pushed by the PRE hook and matched+popped by the POST hook. thread_local,
-// mirroring g_physicsFrames above -- but unlike g_physicsFrames, POST does
-// NOT trust stack position alone: it verifies (slot, services, moveData)
-// identity before treating a frame as its match, and every frame carries
-// the diagnostic generation it was created under so a stale frame can
-// never be recorded into a newer test (see Gate2CDiagnostics.h).
-//
-// hasData is why this is a MARKER stack, not just a data stack: a PRE call
-// that finds Gate2C inactive (or admission otherwise not open) still
-// pushes an entry -- with hasData=false and no diagnostic fields filled in
-// -- whenever a real, still-pending frame might exist beneath it on this
-// thread (see the push condition in HookedProcessMovement). Without this,
-// a nested/reentrant call sharing an OLDER frame's exact identity
-// (slot+services+moveData -- plausible if CMoveData is a reused per-tick
-// buffer, not just under true call nesting) would push nothing, and its
-// POST -- which does not gate on IsActiveForSlot -- would have no way to
-// tell "no frame was ever meant for me" apart from "my frame is just
-// deeper in the stack," and could wrongly match and consume the older
-// call's real frame. A hasData=false marker reserves this call's stack
-// position so POST always finds SOMETHING for it (real data or an
-// explicit non-recording marker) before it could ever fall through to an
-// unrelated older frame.
-//
-// Depth is bounded (kGate2CMaxFrameDepth). An EARLIER design evicted the
-// single oldest pending entry to make room for a new push. That is NOT
-// safe: the evicted invocation's real ProcessMovement call may still be
-// executing (genuine deep nesting), and if a LATER, unrelated invocation
-// with the SAME (slot, services, moveData) identity is pushed afterward,
-// the evicted call's eventual POST would search the stack, find that
-// later unrelated frame as an apparent match, and consume it -- silently
-// pairing two different invocations. Eviction only guarantees "no match
-// found is safe"; it does not guarantee "a match found is the right one"
-// once an identity has been allowed to reappear after a gap.
-//
-// Instead: once depth would be exceeded, this thread's Gate2C tracking is
-// POISONED for the (slot, generation) pair in effect at that moment (see
-// g_gate2cPoisoned below). Poisoning wipes every currently-pending frame,
-// stops all further CMoveData writes and frame pushes for that (slot,
-// generation) on this thread, and marks the diagnostic result INVALID
-// (not merely "some samples dropped") once Finalize runs -- see
-// RecordOverflowPoisoned in Gate2CDiagnostics.h. A fresh Start() (a new
-// generation) clears the poison automatically, since it is checked
-// against the CURRENT generation, not a persistent flag that outlives it.
-struct Gate2CFrame
-{
-    int slot = -1;
-    void* services = nullptr;
-    void* moveData = nullptr;
-    uint64_t invocationId = 0;
-    uint32_t generation = 0;
-    bool hasData = false; // false: non-recording marker only -- every field
-                           // below is meaningless and MUST NOT be read.
-    float preForward = 0, preSide = 0;
-    float injectedForward = 0, injectedSide = 0;
-    bool wroteIntent = false;
-    bool lockAllActive = false;
-};
-constexpr size_t kGate2CMaxFrameDepth = 8;
-thread_local std::vector<Gate2CFrame> g_gate2cFrames;
-
-// Set once this thread's Gate2C tracking has been poisoned by depth
-// overflow (see the comment above Gate2CFrame). Scoped to the specific
-// (slot, generation) pair active at the moment of poisoning: a different
-// slot, or the same slot after a fresh Start() advances the generation,
-// is NOT considered poisoned -- there is nothing stale left to mismatch
-// against either way, since poisoning always wipes g_gate2cFrames.
-thread_local bool g_gate2cPoisoned = false;
-thread_local int g_gate2cPoisonedSlot = -1;
-thread_local uint32_t g_gate2cPoisonedGeneration = 0;
-
-// True if this thread's Gate2C tracking is currently poisoned FOR slot,
-// i.e. for the exact (slot, generation) pair that triggered poisoning.
-bool Gate2CThreadPoisonedFor(int slot)
-{
-    if (!g_gate2cPoisoned) return false;
-    if (slot != g_gate2cPoisonedSlot) return false;
-    return gate2c::CurrentGeneration(slot) == g_gate2cPoisonedGeneration;
-}
+// Gate 2C's per-invocation PRE/POST pairing state (the bounded, per-
+// thread positional LIFO stack, the overflow tier, and the fatal-depth
+// flag) now lives entirely in Gate2CDiagnostics.cpp -- see
+// Gate2CDiagnostics.h's ReserveFrame/CommitFrame/BeginResolveFrame/
+// CommitResolvedSample and that file's top-of-file comment for the
+// source-backed reasoning (KHook's own thread_local, unconditional,
+// strictly-LIFO per-invocation stack) this design mirrors, INCLUDING why
+// a failed admission (ReserveFrame returning AdmissionClosed) still gets
+// a full positional reservation, just not a barrier one -- a failed
+// admission is never treated as license to skip tracking this
+// invocation's position, precisely because its own POST still fires
+// unconditionally regardless of whether admission was open. Identity
+// (slot/services/moveData) can coincide exactly between two genuinely
+// distinct invocations (pointer reuse is expected on this codebase's own
+// evidence), so it is never relied on to prevent that. InputInjector.cpp
+// holds no Gate2C frame state of its own: the PRE hook below calls
+// ReserveFrame then (only if Reserved) CommitFrame; the POST hook calls
+// BeginResolveFrame then (only if DataReady) CommitResolvedSample.
+// Neither performs any identity search -- pairing is positional, not a
+// scan.
 
 bool g_installed = false;
 // True once PhysicsSimulate is hooked
@@ -614,109 +555,67 @@ KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexce
             // original ProcessMovement body (this hook remains Ignore),
             // so the real physics step consumes whatever is written here.
             //
-            // Pairing: pushes a Gate2CFrame carrying this call's identity
-            // (slot/services/moveData), a unique invocation id, and the
-            // slot's CURRENT diagnostic generation. The POST hook matches
-            // on identity, not stack position alone -- see Gate2CFrame's
-            // declaration for why (KHook does not document pre/post as
-            // immune to reentrancy).
-            //
-            // A marker (real or non-recording) is pushed whenever Gate2C is
-            // active OR this thread's stack is already non-empty -- the
-            // latter covers a call that finds Gate2C inactive while an
-            // OLDER, still-pending real frame with the same identity might
-            // exist beneath it (see Gate2CFrame's comment for why that's a
-            // real hazard, not a hypothetical one). When neither condition
-            // holds (the overwhelmingly common case once Gate2C has never
-            // been touched), this is a single empty-check, no allocation.
-            const bool poisonedForThisCall = Gate2CThreadPoisonedFor(slot);
-            if (!poisonedForThisCall)
+            // Pairing is POSITIONAL (see Gate2CDiagnostics.h's
+            // ReserveFrame/CommitFrame), mirroring KHook's own
+            // thread_local, unconditional, strictly-LIFO per-invocation
+            // dispatch -- not an identity search. ReserveFrame is called
+            // unconditionally for every real invocation; its own cheap
+            // internal fast path handles the common "Gate2C untouched on
+            // this thread" case, so there is exactly one place that
+            // decision is made. (slot, services, moveData) identity is
+            // still passed through so ResolveFrame can later assert the
+            // positional invariant held -- it plays no role in deciding
+            // which entry a POST resolves.
+            gate2c::Gate2CReservation reservation = gate2c::ReserveFrame(slot, services, moveData);
+            if (reservation.admission == gate2c::Gate2CAdmission::Reserved)
             {
-                const bool gate2cActive = gate2c::IsActiveForSlot(slot);
-                if (gate2cActive || !g_gate2cFrames.empty())
+                bool wroteIntent = false;
+                float injectedForward = forwardMove, injectedSide = sideMove; // unless written below
+                bool lockAllActive = false;
+
+                if (reservation.active)
                 {
-                    if (g_gate2cFrames.size() >= kGate2CMaxFrameDepth)
+                    float wantForward = 0.0F, wantLeft = 0.0F;
+                    wroteIntent = PeekUsercmdMovement(slot, wantForward, wantLeft);
+                    const float scale = gate2c::WriteScaleForSlot(slot);
+                    if (wroteIntent)
                     {
-                        // Ambiguous-pairing risk past this point (see the
-                        // comment above Gate2CFrame's declaration): poison
-                        // this thread for this (slot, generation) rather
-                        // than evict-and-continue. Wipe every pending
-                        // frame, stop injecting and stop collecting for the
-                        // rest of this generation, and mark the diagnostic
-                        // result INVALID once Finalize runs. A fresh
-                        // Start() (a new generation) clears this
-                        // automatically via Gate2CThreadPoisonedFor's
-                        // generation check.
-                        g_gate2cPoisoned = true;
-                        g_gate2cPoisonedSlot = slot;
-                        g_gate2cPoisonedGeneration = gate2c::CurrentGeneration(slot);
-                        g_gate2cFrames.clear();
-                        gate2c::RecordOverflowPoisoned(slot);
-                        // No push, no CMoveData write, for this invocation
-                        // either -- it is the one that triggered the
-                        // ambiguity; the safe response is to stop tracking
-                        // entirely, not to salvage a partial record of it.
+                        // writeScale is an explicit, test-supplied parameter
+                        // (see Gate2CDiagnostics::Start) -- NOT assumed to be
+                        // kUsercmdKeyboardMoveScale (450), and 1.0 is not
+                        // asserted as the established CMoveData unit either.
+                        // Gate2B's own runtime evidence observed
+                        // CMoveData.forwardmove ~= 1.0 during a real,
+                        // naturally-occurring forward tick, which is why 450
+                        // must not be assumed correct here merely because the
+                        // PlayerRunCommand path uses it for the usercmd's
+                        // legacy scalar field -- a different field, on a
+                        // different object, with no independently verified
+                        // shared unit. Both remain hypotheses the test itself
+                        // evaluates, not established facts.
+                        float writeForward = wantForward * scale;
+                        float writeSide = wantLeft * scale;
+                        auto* mutableBase = static_cast<uint8_t*>(moveData);
+                        std::memcpy(mutableBase + 0x2C, &writeForward, sizeof(float));
+                        std::memcpy(mutableBase + 0x30, &writeSide, sizeof(float));
+                        std::memcpy(&injectedForward, mutableBase + 0x2C, sizeof(float)); // read-back
+                        std::memcpy(&injectedSide, mutableBase + 0x30, sizeof(float));
                     }
-                    else
-                    {
-                        Gate2CFrame frame;
-                        frame.slot = slot;
-                        frame.services = services;
-                        frame.moveData = moveData;
-                        frame.invocationId = gate2c::NextInvocationId();
-                        frame.hasData = gate2cActive;
-
-                        if (gate2cActive)
-                        {
-                            float wantForward = 0.0F, wantLeft = 0.0F;
-                            bool wroteIntent = PeekUsercmdMovement(slot, wantForward, wantLeft);
-                            float injectedForward = forwardMove, injectedSide = sideMove; // unless written below
-                            const float scale = gate2c::WriteScaleForSlot(slot);
-                            if (wroteIntent)
-                            {
-                                // writeScale is an explicit, test-supplied parameter
-                                // (see Gate2CDiagnostics::Start) -- NOT assumed to be
-                                // kUsercmdKeyboardMoveScale (450), and 1.0 is not
-                                // asserted as the established CMoveData unit either.
-                                // Gate2B's own runtime evidence observed
-                                // CMoveData.forwardmove ~= 1.0 during a real,
-                                // naturally-occurring forward tick, which is why 450
-                                // must not be assumed correct here merely because the
-                                // PlayerRunCommand path uses it for the usercmd's
-                                // legacy scalar field -- a different field, on a
-                                // different object, with no independently verified
-                                // shared unit. Both remain hypotheses the test itself
-                                // evaluates, not established facts.
-                                float writeForward = wantForward * scale;
-                                float writeSide = wantLeft * scale;
-                                auto* mutableBase = static_cast<uint8_t*>(moveData);
-                                std::memcpy(mutableBase + 0x2C, &writeForward, sizeof(float));
-                                std::memcpy(mutableBase + 0x30, &writeSide, sizeof(float));
-                                std::memcpy(&injectedForward, mutableBase + 0x2C, sizeof(float)); // read-back
-                                std::memcpy(&injectedSide, mutableBase + 0x30, sizeof(float));
-                            }
-
-                            frame.generation = gate2c::CurrentGeneration(slot);
-                            frame.preForward = forwardMove;
-                            frame.preSide = sideMove;
-                            frame.injectedForward = injectedForward;
-                            frame.injectedSide = injectedSide;
-                            frame.wroteIntent = wroteIntent;
-                            frame.lockAllActive = bot_controller_state::GetAll(slot);
-                        }
-                        // else: hasData stays false. This is a non-recording
-                        // marker only -- Gate2C is inactive for this call, but
-                        // the marker still reserves this stack position so a
-                        // later POST for THIS specific invocation cannot fall
-                        // through to an older, unrelated real frame beneath it.
-
-                        g_gate2cFrames.push_back(frame);
-                    }
+                    lockAllActive = bot_controller_state::GetAll(slot);
                 }
+                // else: reservation.active is false -- Gate2C is inactive
+                // for this call. CommitFrame(hasData=false) below still
+                // completes this reservation as an inert, non-recording
+                // marker so a later POST for THIS specific invocation
+                // cannot fall through to an older, unrelated entry.
+
+                gate2c::CommitFrame(slot, reservation.invocationId, reservation.active, forwardMove, sideMove,
+                                     wroteIntent, injectedForward, injectedSide, lockAllActive);
             }
-            // else: this thread is poisoned for this exact (slot, generation)
-            // -- fully inert, no push, no write, until a fresh Start() for
-            // this slot advances the generation.
+            // else: NotTracked / AdmissionClosed / Overflow -- ReserveFrame
+            // already performed any required accounting; nothing further
+            // to do here, and CMoveData must not be written for this
+            // invocation (see Gate2CAdmission::Overflow's contract).
         }
     }
     return { KHook::Action::Ignore };
@@ -729,76 +628,41 @@ KHook::Return<void> HookedProcessMovement(void* services, void* moveData) noexce
 // HookedProcessMovement below -- the exact same pre+post pairing pattern
 // already proven in this file for HookedPhysicsSimulate/PhysicsSimulatePost.
 //
-// Deliberately does NOT gate on gate2c::IsActiveForSlot: a frame pushed
-// by the PRE hook just before Finalize() ran must still be found and
-// popped here, or it would leak in this thread's stack forever (Finalize
-// cannot reach into another thread's thread_local storage to clear it).
-// The common Gate2C-disabled case is instead handled by the cheap
-// g_gate2cFrames.empty() check immediately below -- no frame is ever
-// pushed while inactive, so that array stays empty and this is a single
-// vector-empty check, not meaningfully different in cost from the
-// previous flag check.
+// Deliberately does NOT gate on gate2c::IsActiveForSlot, and calls
+// BeginResolveFrame unconditionally for EVERY invocation, not just when
+// this thread is known to have something pending -- BeginResolveFrame's
+// own cheap internal fast paths handle the common cases, and this is
+// what keeps this thread's positional bookkeeping in exact lockstep with
+// KHook's own unconditional per-invocation pairing (see
+// Gate2CDiagnostics.h's top-of-file comment). A frame reserved by the
+// PRE hook just before Finalize() ran must still be positionally
+// resolved here, or this thread's stack would never rebalance.
+//
+// CMoveData is only read a second time (postForward/postSide/velocity/
+// origin) when BeginResolveFrame reports DataReady -- every other
+// outcome (Unmatched/NonRecording/Mismatch/OverflowResolved/FatalDepth)
+// needs no POST-side data at all, so that read is skipped for them.
 KHook::Return<void> HookedProcessMovementPost(void* services, void* moveData) noexcept
 {
-    if (g_gate2cFrames.empty()) return { KHook::Action::Ignore };
-
     int slot = pawn_binding::ServicesToSlot(services);
+    gate2c::Gate2CResolution resolution = gate2c::BeginResolveFrame(slot, services, moveData);
 
-    // Search from the top (most recently pushed) down for a frame whose
-    // identity matches this exact call. Bounded by kGate2CMaxFrameDepth --
-    // never an unbounded scan. A match found below the top means the
-    // frame(s) above it belong to invocations whose own POST never
-    // arrived (or arrived out of order) before this one did; those are
-    // orphaned and discarded, never merged into any recorded sample.
-    int matchIndex = -1;
-    for (int i = static_cast<int>(g_gate2cFrames.size()) - 1; i >= 0; --i)
+    if (resolution.outcome == gate2c::Gate2CResolutionOutcome::DataReady)
     {
-        const Gate2CFrame& f = g_gate2cFrames[i];
-        if (f.slot == slot && f.services == services && f.moveData == moveData)
-        {
-            matchIndex = i;
-            break;
-        }
+        const auto* base = static_cast<const uint8_t*>(moveData);
+        float postForward, postSide, velX, velY, velZ, originX, originY, originZ;
+        std::memcpy(&postForward, base + 0x2C, sizeof(float));
+        std::memcpy(&postSide, base + 0x30, sizeof(float));
+        std::memcpy(&velX, base + 0x38, sizeof(float));
+        std::memcpy(&velY, base + 0x3C, sizeof(float));
+        std::memcpy(&velZ, base + 0x40, sizeof(float));
+        std::memcpy(&originX, base + 0xC8, sizeof(float));
+        std::memcpy(&originY, base + 0xCC, sizeof(float));
+        std::memcpy(&originZ, base + 0xD0, sizeof(float));
+
+        gate2c::CommitResolvedSample(slot, resolution, MonotonicMilliseconds(), postForward, postSide, velX, velY,
+                                      velZ, originX, originY, originZ);
     }
-
-    if (matchIndex < 0)
-    {
-        gate2c::RecordUnmatchedPost(slot);
-        return { KHook::Action::Ignore };
-    }
-
-    const int orphaned = static_cast<int>(g_gate2cFrames.size()) - 1 - matchIndex;
-    for (int i = 0; i < orphaned; ++i) gate2c::RecordOrphanedFrame(slot);
-
-    const Gate2CFrame frame = g_gate2cFrames[matchIndex];
-    g_gate2cFrames.resize(static_cast<size_t>(matchIndex)); // drops the match and every orphan above it
-
-    if (!frame.hasData)
-    {
-        // Non-recording marker: this invocation's PRE ran while Gate2C was
-        // inactive (e.g. a test finalized between a nested call's PRE and
-        // POST). Correctly matched -- proving no mismatch occurred -- but
-        // there is no real PRE/INJECTED data to record, and none of this
-        // frame's other fields are meaningful. Counted distinctly so this
-        // expected case is never confused with an unmatched/orphaned one.
-        gate2c::RecordNonRecordingMatch(slot);
-        return { KHook::Action::Ignore };
-    }
-
-    const auto* base = static_cast<const uint8_t*>(moveData);
-    float postForward, postSide, velX, velY, velZ, originX, originY, originZ;
-    std::memcpy(&postForward, base + 0x2C, sizeof(float));
-    std::memcpy(&postSide, base + 0x30, sizeof(float));
-    std::memcpy(&velX, base + 0x38, sizeof(float));
-    std::memcpy(&velY, base + 0x3C, sizeof(float));
-    std::memcpy(&velZ, base + 0x40, sizeof(float));
-    std::memcpy(&originX, base + 0xC8, sizeof(float));
-    std::memcpy(&originY, base + 0xCC, sizeof(float));
-    std::memcpy(&originZ, base + 0xD0, sizeof(float));
-
-    gate2c::RecordResult(slot, frame.generation, frame.invocationId, MonotonicMilliseconds(), frame.preForward,
-                          frame.preSide, frame.wroteIntent, frame.injectedForward, frame.injectedSide,
-                          frame.lockAllActive, postForward, postSide, velX, velY, velZ, originX, originY, originZ);
     return { KHook::Action::Ignore };
 }
 
