@@ -20,7 +20,8 @@
 // Console commands (all admin-only, all fail-soft -- never throw to the caller):
 //   css_poc_gate1                          -- load diagnostic snapshot (capability+ABI only)
 //   css_poc_baseline <slot>                 -- log current AbsOrigin/EyeAngles for slot
-//   css_poc_gate2 <slot> <durationMs>        -- suppress AI, inject forward movement, sample
+//   css_poc_gate2 <slot> <ms> [lockMode]     -- suppress AI (lockMode: all|aim, default all),
+//                                                inject forward movement, sample position+eye
 //   css_poc_gate3 <slot> <pitch> <yaw> <ms>  -- DISABLED, see comment above OnGate3 and README
 //   css_poc_stop <slot>                     -- cancel all injections/locks/replay for slot, unlock
 
@@ -144,12 +145,43 @@ public sealed class PocHarnessPlugin : BasePlugin
     // ---- GATE 2: movement ----
     private readonly Dictionary<int, long> _activeMovement = new();
 
-    [ConsoleCommand("css_poc_gate2", "GATE2: suppress AI, inject bounded forward movement, sample position")]
-    [CommandHelper(minArgs: 2, usage: "<slot> <durationMs>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    // Diagnostic addition: Gate 2's original design hardcoded LockKind.All. Source
+    // inspection after the first Gate 2 run (which accepted both Lock(All) and
+    // StartUsercmdMovement but produced zero displacement across 129 samples)
+    // found that LockKind.All supersedes CCSBot::Update's real body entirely
+    // (BotController.cpp HookedUpdate), while ApplyUsercmdMovement's own doc
+    // comment ("Replaces Bot AI analog movement after the final command is
+    // generated", InputInjector.cpp) assumes a command already exists to modify.
+    // TECH.md's own Lock Model section documents that Aim -- unlike All -- leaves
+    // the bot able to "still move and decide". This parameter lets the operator
+    // choose which lock kind to combine with StartUsercmdMovement, to determine
+    // empirically whether that's actually the reason -- a hypothesis, not yet
+    // confirmed, since PlayerRunCommand's own invocation conditions live in the
+    // closed-source engine, not in this repository.
+    [ConsoleCommand("css_poc_gate2", "GATE2: suppress AI, inject bounded forward movement, sample position+eye")]
+    [CommandHelper(minArgs: 2, usage: "<slot> <durationMs> [lockMode: all|aim, default all]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnGate2(CCSPlayerController? caller, CommandInfo cmd)
     {
         if (!int.TryParse(cmd.GetArg(1), out var slot) || !int.TryParse(cmd.GetArg(2), out var durationMs))
         { Log("[gate2] bad args"); return; }
+
+        // Optional 3rd arg, defaults to "all" -- preserves prior behavior exactly
+        // when omitted, per this task's authorization.
+        var lockModeArg = cmd.GetArg(3);
+        LockKind lockKind;
+        if (string.IsNullOrWhiteSpace(lockModeArg) || lockModeArg.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            lockKind = LockKind.All;
+        }
+        else if (lockModeArg.Equals("aim", StringComparison.OrdinalIgnoreCase))
+        {
+            lockKind = LockKind.Aim;
+        }
+        else
+        {
+            Log($"[gate2] bad lockMode arg '{lockModeArg}' -- must be 'all' or 'aim' (omit for default 'all')");
+            return;
+        }
 
         var api = BotControllerCap.Get();
         if (api is null) { Log("[gate2] FAIL: capability not available (run gate1 first)"); return; }
@@ -158,22 +190,22 @@ public sealed class PocHarnessPlugin : BasePlugin
         var pawn = controller.PlayerPawn?.Value;
         if (pawn is null) { Log($"[gate2] slot {slot} has no pawn"); return; }
 
-        var (okPre, originPre, _, detailPre) = ReadPawnState(pawn);
+        var (okPre, originPre, eyePre, detailPre) = ReadPawnState(pawn);
         Log(okPre
-            ? $"[gate2] PRE origin=({originPre!.X:F4},{originPre.Y:F4},{originPre.Z:F4})"
+            ? $"[gate2] PRE origin=({originPre!.X:F4},{originPre.Y:F4},{originPre.Z:F4}) eye=({eyePre!.X:F4},{eyePre.Y:F4})"
             : $"[gate2] PRE read FAILED: {detailPre} -- aborting, cannot establish baseline");
         if (!okPre) return;
 
         bool locked;
-        try { locked = api.Lock(slot, LockKind.All); }
+        try { locked = api.Lock(slot, lockKind); }
         catch (Exception ex) { Log($"[gate2] Lock threw {ex.GetType().Name}: {ex.Message}"); return; }
-        Log($"[gate2] Lock(All) accepted={locked} (per BotControllerApi/Types.cs: freezes CCSBot::Update AND CCSBot::Upkeep -- acceptance only, not proof it held)");
+        Log($"[gate2] Lock({lockKind}) accepted={locked} (per BotControllerApi/Types.cs: All freezes CCSBot::Update AND Upkeep, Aim freezes only Upkeep -- acceptance only, not proof it held)");
 
         long movementId;
         try { movementId = api.StartUsercmdMovement(slot, forwardMove: 1.0f, leftMove: 0.0f); }
-        catch (Exception ex) { Log($"[gate2] StartUsercmdMovement threw {ex.GetType().Name}: {ex.Message}"); if (locked) api.Unlock(slot, LockKind.All); return; }
+        catch (Exception ex) { Log($"[gate2] StartUsercmdMovement threw {ex.GetType().Name}: {ex.Message}"); if (locked) api.Unlock(slot, lockKind); return; }
         Log($"[gate2] StartUsercmdMovement accepted, id={movementId} (id<0 or ==-1 conventionally means rejected -- treat as such, not as success)");
-        if (movementId < 0) { if (locked) api.Unlock(slot, LockKind.All); return; }
+        if (movementId < 0) { if (locked) api.Unlock(slot, lockKind); return; }
         _activeMovement[slot] = movementId;
 
         // Bounded sampling loop: one sample per server tick for the requested
@@ -181,15 +213,17 @@ public sealed class PocHarnessPlugin : BasePlugin
         _gate2Samples.Clear();
         _gate2Slot = slot;
         _gate2Pawn = pawn;
+        _gate2LockKind = lockKind;
         _gate2DeadlineMs = MonotonicMs() + durationMs;
         _gate2Active = true;
-        Log($"[gate2] sampling started for {durationMs}ms. Call css_poc_stop {slot} early if needed; otherwise it self-stops and logs the full trace.");
+        Log($"[gate2] sampling started for {durationMs}ms with lockKind={lockKind}. Call css_poc_stop {slot} early if needed; otherwise it self-stops and logs the full trace.");
     }
 
-    private readonly List<(long tMs, float x, float y, float z)> _gate2Samples = new();
+    private readonly List<(long tMs, float x, float y, float z, float pitch, float yaw)> _gate2Samples = new();
     private bool _gate2Active;
     private int _gate2Slot;
     private CCSPlayerPawn? _gate2Pawn;
+    private LockKind _gate2LockKind;
     private long _gate2DeadlineMs;
 
     private static long MonotonicMs() => Environment.TickCount64;
@@ -203,8 +237,8 @@ public sealed class PocHarnessPlugin : BasePlugin
     {
         if (_gate2Active && _gate2Pawn is not null)
         {
-            var (ok, origin, _, _) = ReadPawnState(_gate2Pawn);
-            if (ok) _gate2Samples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z));
+            var (ok, origin, eye, _) = ReadPawnState(_gate2Pawn);
+            if (ok) _gate2Samples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z, eye!.X, eye.Y));
             if (MonotonicMs() >= _gate2DeadlineMs)
             {
                 _gate2Active = false;
@@ -230,14 +264,15 @@ public sealed class PocHarnessPlugin : BasePlugin
         {
             try { api.CancelUsercmdMovement(_gate2Slot, id); } catch { /* diagnostic-only, fail soft */ }
         }
-        Log($"[gate2] sample count={_gate2Samples.Count}");
+        Log($"[gate2] sample count={_gate2Samples.Count} lockKind={_gate2LockKind}");
         foreach (var s in _gate2Samples)
-            Log($"[gate2] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4})");
+            Log($"[gate2] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4})");
         if (_gate2Samples.Count >= 2)
         {
             var first = _gate2Samples[0]; var last = _gate2Samples[^1];
             var dist = MathF.Sqrt(MathF.Pow(last.x - first.x, 2) + MathF.Pow(last.y - first.y, 2) + MathF.Pow(last.z - first.z, 2));
-            Log($"[gate2] net displacement over window: {dist:F4} units. Continuity must be assessed from the full per-sample trace above (monotonic-ish progress, no single-sample teleport jump), not from this net figure alone.");
+            var eyeDelta = MathF.Sqrt(MathF.Pow(last.pitch - first.pitch, 2) + MathF.Pow(last.yaw - first.yaw, 2));
+            Log($"[gate2] net displacement over window: {dist:F4} units, net eye-angle change: {eyeDelta:F4} deg (lockKind={_gate2LockKind}). Continuity must be assessed from the full per-sample trace above (monotonic-ish progress, no single-sample teleport jump), not from this net figure alone. Under lockKind=All, ANY eye-angle change here would itself be a finding (Upkeep is meant to be frozen too); under lockKind=Aim, eye-angle drift is expected (Upkeep runs normally) -- only the requested StartUsercmdMovement's forward displacement is under test.");
         }
         // Acceptance criteria, corrected post-restart: "AI suppression worked" is
         // judged ONLY from the sampled window above, while Lock(All) was active.
@@ -297,7 +332,13 @@ public sealed class PocHarnessPlugin : BasePlugin
         // cannot even affect whether this file builds. Re-enabling requires both
         // removing this #if false and replacing the zeroed fields below with a
         // live pre-read of the target bot's actual state (see the comment above
-        // OnGate3 and the README's "Gate 3 disabled" section).
+        // OnGate3 and the README's "Gate 3 disabled" section). Also worth
+        // rechecking before any re-enable: api.SetReplayPawn(slot, pawn.Handle)
+        // below looks suspect -- SetReplayPawn expects a native pointer (nint),
+        // while CCSPlayerPawn.Handle is CounterStrikeSharp's entity handle, a
+        // different concept (likely pawn.Address is intended instead). Flagged
+        // from re-reading the signatures, not yet confirmed by an actual
+        // compiler error against this specific line.
         if (!int.TryParse(cmd.GetArg(1), out var slot)
             || !float.TryParse(cmd.GetArg(2), out var pitch)
             || !float.TryParse(cmd.GetArg(3), out var yaw)

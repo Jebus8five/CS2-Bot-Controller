@@ -12,9 +12,66 @@ CS2-Smarter-Bot already uses in production, not source inclusion.
 - `BotControllerPocHarness.csproj` -- net10.0, CounterStrikeSharp.API 1.0.375, references the
   already-extracted, hash-verified `BotControllerApi.dll` from `C:\CS2BotControllerBuild`.
 - `PocHarnessPlugin.cs` -- the harness itself. Console commands: `css_poc_gate1`,
-  `css_poc_baseline <slot>`, `css_poc_gate2 <slot> <durationMs>`,
+  `css_poc_baseline <slot>`, `css_poc_gate2 <slot> <durationMs> [lockMode: all|aim, default all]`,
   `css_poc_gate3 <slot> <pitch> <yaw> <durationMs>` (**disabled**, see below),
   `css_poc_stop <slot>`.
+
+## Gate 2 `lockMode` parameter (diagnostic addition)
+
+The first real Gate 2 run accepted both `Lock(All)` and `StartUsercmdMovement`
+(movement id >= 0, no exceptions) but produced **zero displacement across all 129
+samples** over a 2000ms window. Reading the pinned-commit native source afterward
+found a plausible, source-grounded (but not proven) explanation: `LockKind.All`
+supersedes `CCSBot::Update`'s real body entirely
+(`src/features/controller/BotController.cpp`, `HookedUpdate`), while
+`ApplyUsercmdMovement`'s own doc comment
+(`src/features/recorder/InputInjector.cpp`: "Replaces Bot AI analog movement
+after the final command is generated") assumes a command already exists for it to
+modify. This repository's own `TECH.md` documents that `Aim` -- unlike `All` --
+leaves the bot able to "still move and decide". `css_poc_gate2`'s new optional
+3rd argument lets the operator pick `all` (default, unchanged behavior) or `aim`,
+to test this empirically: if `StartUsercmdMovement` produces real displacement
+under `Lock(Aim)` but not `Lock(All)`, that confirms the hypothesis; if it's still
+zero under `Lock(Aim)`, the hypothesis is wrong and the cause lies elsewhere.
+Gate 2 now also records eye angles (pitch/yaw) alongside position on every sample,
+not just position -- useful under `Aim` (where eye drift is expected, since
+`Upkeep` runs normally) and as a cross-check under `All` (where any eye-angle
+change would itself be a finding, since `Upkeep` is meant to be frozen too).
+
+## Recommended RCON sequence for exactly one bot next time
+
+The first Gate 2 run discovered the isolated server auto-fills to `bot_quota 10`
+on map load, because `gamemode_casual.cfg` sets `bot_quota 10` / `bot_quota_mode
+fill` and our `server.cfg` never overrides the game mode. Five bots were already
+present before the operator's own `bot_add_ct` call. The smallest fix needs no
+file changes at all -- just this RCON command order right after map load, before
+adding the one intended bot:
+
+```
+bot_kick
+bot_quota 0
+bot_add_ct
+```
+
+`bot_kick` clears whatever the autofill already added; `bot_quota 0` stops it from
+refilling; the final `bot_add_ct` then adds exactly the one CT bot intended for
+the experiment.
+
+## Proposed native diagnostic (NOT implemented -- for separate approval)
+
+Managed-side instrumentation (this harness) can observe position/eye-angle
+before, during and after Gate 2, but cannot see whether `HookedPlayerRunCommand`
+(`InputInjector.cpp`) is invoked at all for a slot on ticks where `CCSBot::Update`
+was superseded -- that's the one open question source-reading couldn't resolve.
+A minimal, opt-in native diagnostic would be a per-slot tick counter incremented
+at the top of `HookedPlayerRunCommand`, exported read-only (mirroring the
+existing `BotController_GetVersion` export pattern), read before/after a Gate 2
+window. A nonzero delta during a zero-displacement `Lock(All)` run would show the
+hook fires but the movement still doesn't land (pointing at `ApplyUsercmdMovement`
+or downstream simulation); a zero delta would show the hook simply isn't invoked
+for a superseded bot (pointing at the engine's own bot-command generation, as
+hypothesized). This is a native code change and is explicitly out of scope for
+this session -- proposed here, not built.
 
 ## Build blocker -- reported, not worked around
 
