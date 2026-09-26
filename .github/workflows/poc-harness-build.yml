@@ -26,6 +26,11 @@ jobs:
       - name: Build harness (also builds its BotControllerApi project reference)
         run: dotnet build poc/BotControllerPocHarness -c Release
 
+      # Unit tests for the harness's engine-free decision logic only
+      # (TeleportSafety); no CS2 server is involved.
+      - name: Test harness decision logic
+        run: dotnet test poc/BotControllerPocHarness.Tests -c Release --logger "console;verbosity=normal"
+
       - name: Stage artifact + dependency
         run: |
           set -euo pipefail
