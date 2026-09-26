@@ -923,6 +923,11 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
     const float fwdBefore = hasBaseBefore ? pcConst->base().forwardmove() : 0.0f;
     const float sideBefore = hasBaseBefore ? pcConst->base().leftmove() : 0.0f;
     const int subtickBefore = hasBaseBefore ? pcConst->base().subtick_moves_size() : 0;
+    // Raw held-button mask, independent of hasBase -- same field
+    // ApplyUsercmdMovement already reads/writes below. See Gate2BDiagnostics.h's
+    // comment on RecordPlayerRunCommandObservation for why no bit here is
+    // interpreted as a specific button (e.g. "walk") by this file.
+    const uint64_t heldMaskBefore = pcConst->buttonstates.m_pButtonStates[0];
 
     if (recording || replaying || hasUsercmdInjection || hasUsercmdSuppression || hasUsercmdMovement)
     {
@@ -948,10 +953,12 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
     const bool hasBaseAfter = pcConst->has_base();
     const float fwdAfter = hasBaseAfter ? pcConst->base().forwardmove() : 0.0f;
     const float sideAfter = hasBaseAfter ? pcConst->base().leftmove() : 0.0f;
+    const uint64_t heldMaskAfter = pcConst->buttonstates.m_pButtonStates[0];
 
     gate2b::RecordPlayerRunCommandObservation(slot, gate2b::CurrentPhysicsSimulateSeq(slot), MonotonicMilliseconds(),
                                                 pcConst->cmdNum, hasUsercmdMovement, hasBaseBefore, fwdBefore,
-                                                sideBefore, fwdAfter, sideAfter, subtickBefore);
+                                                sideBefore, fwdAfter, sideAfter, subtickBefore, heldMaskBefore,
+                                                heldMaskAfter);
 
     return { KHook::Action::Ignore };
 }

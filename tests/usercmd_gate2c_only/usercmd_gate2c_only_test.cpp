@@ -17,6 +17,13 @@
 //      is the sole suppression decision point, removing a narrow but real
 //      stale-snapshot asymmetry the outer gate could otherwise introduce.
 //
+// TestUpdateDoesNotReactivatePrc additionally mirrors UpdateUsercmdMovement
+// (InputInjector.cpp) -- unmodified by either fix above -- to verify the
+// Gate2C precision-control extension's reliance on it: mutating the active
+// Gate2C-only entry's forward/left values in place must not touch ownership
+// (owner_/g_gate2cOnlyOwners), so PRC stays suppressed across an update, while
+// Gate2C's own reader sees the new values immediately.
+//
 // NOT wired into the main plugin build or CI, and NOT built or run as part
 // of this change unless separately authorized -- see this directory's
 // CMakeLists.txt.
@@ -163,6 +170,25 @@ public:
         if (it == movements_.end()) return false;
         movements_.erase(it);
         if (owner_.movementId == movementId) owner_ = {};
+        return true;
+    }
+
+    // Mirrors UpdateUsercmdMovement (InputInjector.cpp): finds by id and
+    // mutates forwardMove/leftMove in place. Deliberately does NOT touch
+    // owner_ or expiresAtMs at all -- this is the exact property requirement
+    // 2 (the Gate2C-only precision-control extension) asks to verify: an
+    // update to the active Gate2C-only entry's direction must not reactivate
+    // PRC (WouldApply stays false, since owner_.movementId is unchanged) and
+    // must be immediately visible to Peek (Gate2C's own reader), since it is
+    // the SAME entry, mutated in place, still referenced by .back().
+    bool UpdateUsercmdMovement(int64_t movementId, float forwardMove, float leftMove)
+    {
+        std::scoped_lock lock(mutex_);
+        auto it = std::find_if(movements_.begin(), movements_.end(),
+                                [&](const UsercmdMovement& m) { return m.id == movementId; });
+        if (it == movements_.end()) return false;
+        it->forwardMove = forwardMove;
+        it->leftMove = leftMove;
         return true;
     }
 
@@ -456,6 +482,35 @@ void TestCleanupAndUnload()
     CHECK(slot.WouldApply(0));
 }
 
+// ---------------------------------------------------------------------
+// 10. Gate2C precision-control extension, requirement 2: UpdateUsercmdMovement
+//     on the active Gate2C-only entry must change what Peek (Gate2C's reader)
+//     sees, WITHOUT reactivating PRC (WouldApply must stay false throughout,
+//     since ownership is untouched by Update). Also covers repeated updates
+//     and updating a since-cancelled/expired id being a correct no-op.
+// ---------------------------------------------------------------------
+void TestUpdateDoesNotReactivatePrc()
+{
+    SlotState slot;
+    int64_t id = slot.StartUsercmdMovementGate2COnly(1, 1.0F, 0.0F, kMaxDurationMs, 0);
+    CHECK(id == 1);
+    CHECK(!slot.WouldApply(0)); // suppressed from the start, as already covered elsewhere
+
+    CHECK(slot.UpdateUsercmdMovement(id, -1.0F, 0.0F)); // e.g. a reversal
+    CHECK(!slot.WouldApply(0)); // still suppressed -- Update must not touch ownership
+    auto peeked = slot.Peek(0);
+    CHECK(peeked.has_value() && peeked->forwardMove == -1.0F); // Gate2C's reader sees the NEW value immediately
+
+    CHECK(slot.UpdateUsercmdMovement(id, 0.0F, 1.0F)); // a second update (e.g. a lateral test)
+    CHECK(!slot.WouldApply(0));
+    peeked = slot.Peek(0);
+    CHECK(peeked.has_value() && peeked->forwardMove == 0.0F && peeked->leftMove == 1.0F);
+
+    CHECK(slot.CancelUsercmdMovement(id));
+    CHECK(!slot.UpdateUsercmdMovement(id, 1.0F, 0.0F)); // updating a cancelled id is a no-op, not a crash
+    CHECK(!slot.WouldApply(0)); // still nothing to apply -- slot is idle, not reactivated
+}
+
 } // namespace
 
 int main()
@@ -469,6 +524,7 @@ int main()
     TestStartAfterExpiryWithNoInterveningHooks();
     TestConcurrentAccessNoTornObservations();
     TestCleanupAndUnload();
+    TestUpdateDoesNotReactivatePrc();
 
     std::printf("%d/%d checks passed\n", g_checks - g_failures, g_checks);
     return g_failures == 0 ? 0 : 1;

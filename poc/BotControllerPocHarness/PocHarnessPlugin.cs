@@ -22,13 +22,24 @@
 //   css_poc_baseline <slot>                 -- log current AbsOrigin/EyeAngles for slot
 //   css_poc_gate2 <slot> <ms> [lockMode]     -- suppress AI (lockMode: all|aim, default all),
 //                                                inject forward movement, sample position+eye
-//   css_poc_gate2c <slot> <ms> <writeScale> [lockMode] -- like gate2, but ALSO starts the Gate2C
-//                                                native diagnostic, which additionally writes the
-//                                                same movement intent directly into CMoveData
-//                                                inside the ProcessMovement pre-hook. writeScale
-//                                                is required and explicit -- there is no default;
+//   css_poc_gate2c <slot> <ms> <writeScale> [lockMode] [gate2cOnly] [forwardMove] [leftMove]
+//                  [reverseAtMs] [waitForRestMs]
+//                                             -- like gate2, but ALSO starts the Gate2C native
+//                                                diagnostic, which additionally writes the same
+//                                                movement intent directly into CMoveData inside
+//                                                the ProcessMovement pre-hook. writeScale is
+//                                                required and explicit -- there is no default;
 //                                                see Gate2CDiagnostics.h for why 450 must not be
 //                                                assumed and 1.0 is not asserted as established.
+//                                                forwardMove/leftMove (default 1.0/0.0, each in
+//                                                [-1,1]) select direction, including negative for
+//                                                backward/lateral-reverse. reverseAtMs (disabled
+//                                                by default), if set, flips both signs once via
+//                                                the existing UpdateUsercmdMovement mid-run.
+//                                                waitForRestMs (disabled by default), if set,
+//                                                locks the slot and waits up to that long for
+//                                                entity velocity to settle near zero before
+//                                                starting capture at all -- see StartGate2CDiagnostic.
 //   css_poc_gate3 <slot> <pitch> <yaw> <ms>  -- DISABLED, see comment above OnGate3 and README
 //   css_poc_stop <slot>                     -- cancel all injections/locks/replay for slot, unlock
 
@@ -159,6 +170,33 @@ public sealed class PocHarnessPlugin : BasePlugin
             return (true, origin, eye, "ok");
         }
         catch (Exception ex) { return (false, null, null, $"unreadable:{ex.GetType().Name}"); }
+    }
+
+    // ---- Gate2C-only precision-control extension: independent entity-velocity
+    // read, kept as a SEPARATE sibling function rather than folded into
+    // ReadPawnState above so every existing gate2/gate2c/gate3/baseline call
+    // site is completely untouched by this addition. `AbsVelocity` is a real,
+    // callable CBaseEntity property (confirmed via a get_AbsVelocity getter
+    // method present in the referenced CounterStrikeSharp.API.dll -- it has no
+    // XML doc comment in this API version, which is why it doesn't show up in
+    // a docs-only search, but the compiled getter is there), read the exact
+    // same way AbsOrigin already is. This is deliberately INDEPENDENT of
+    // Gate2C's own native CMoveData postVel readback -- the whole point is to
+    // have two separate measurement paths to cross-check against each other,
+    // not a replacement for either. NOT independently verified in this
+    // project's own prior sessions the way CMoveData's offsets were: treat the
+    // first live reading of this as needing a sanity cross-check against the
+    // already-trusted native postVel for the same tick before relying on it
+    // further.
+    private static (bool ok, Vector? velocity, string detail) ReadPawnVelocity(CCSPlayerPawn pawn)
+    {
+        try
+        {
+            var velocity = pawn.AbsVelocity;
+            if (velocity is null) return (false, null, "AbsVelocity null");
+            return (true, velocity, "ok");
+        }
+        catch (Exception ex) { return (false, null, $"unreadable:{ex.GetType().Name}"); }
     }
 
     private static CCSPlayerController? ResolveSlot(int slot) =>
@@ -299,7 +337,26 @@ public sealed class PocHarnessPlugin : BasePlugin
     public override void OnAllPluginsLoaded(bool hotReload)
     {
         RegisterListener<Listeners.OnTick>(OnTick);
+
+        // Gate2C-only precision-control extension: round-transition detection.
+        // Purely a counter -- this never blocks, cancels, or alters a running
+        // test, it only lets a test's own finalize log state whether a round
+        // boundary happened during its window, so a confounded result can be
+        // flagged rather than silently trusted. Independent of every existing
+        // gate/command in this file.
+        RegisterEventHandler<EventRoundStart>((@event, info) =>
+        {
+            _roundTransitionCounter++;
+            return HookResult.Continue;
+        });
+        RegisterEventHandler<EventRoundEnd>((@event, info) =>
+        {
+            _roundTransitionCounter++;
+            return HookResult.Continue;
+        });
     }
+
+    private long _roundTransitionCounter;
 
     private void OnTick()
     {
@@ -333,10 +390,57 @@ public sealed class PocHarnessPlugin : BasePlugin
                 FinishGate3();
             }
         }
+        if (_gate2cWaitingForRest && _gate2cWaitPawn is not null)
+        {
+            var (velOk, velocity, _) = ReadPawnVelocity(_gate2cWaitPawn);
+            bool atRest = velOk && velocity is not null && VectorMagnitude(velocity) < Gate2CRestVelocityThreshold;
+            _gate2cWaitRestTicks = atRest ? _gate2cWaitRestTicks + 1 : 0;
+
+            if (_gate2cWaitRestTicks >= Gate2CRestConsecutiveTicksRequired)
+            {
+                _gate2cWaitingForRest = false;
+                Log($"[gate2c] rest confirmed for slot {_gate2cWaitSlot} ({_gate2cWaitRestTicks} consecutive ticks below " +
+                    $"{Gate2CRestVelocityThreshold} u/s) -- starting capture.");
+                StartGate2CDiagnostic(_gate2cWaitSlot, _gate2cWaitDurationMs, _gate2cWaitWriteScale, _gate2cWaitLockKind,
+                    _gate2cWaitGate2cOnly, _gate2cWaitForwardMove, _gate2cWaitLeftMove, _gate2cWaitReverseAtMs,
+                    _gate2cWaitPawn, preLockedResult: _gate2cWaitLocked);
+            }
+            else if (MonotonicMs() >= _gate2cWaitDeadlineMs)
+            {
+                _gate2cWaitingForRest = false;
+                Log($"[gate2c] TIMEOUT waiting for rest on slot {_gate2cWaitSlot} -- no diagnostic was started, " +
+                    "nothing to finalize; releasing lock now.");
+                var api = BotControllerCap.Get();
+                try { api?.Unlock(_gate2cWaitSlot, _gate2cWaitLockKind); } catch { /* diagnostic-only, fail soft */ }
+            }
+        }
         if (_gate2cActive && _gate2cPawn is not null)
         {
             var (ok, origin, eye, _) = ReadPawnState(_gate2cPawn);
-            if (ok) _gate2cSamples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z, eye!.X, eye.Y));
+            var (velOk, velocity, _) = ReadPawnVelocity(_gate2cPawn);
+            if (ok) _gate2cSamples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z, eye!.X, eye.Y,
+                velOk, velocity?.X ?? 0f, velocity?.Y ?? 0f, velocity?.Z ?? 0f));
+
+            if (!_gate2cReversed && _gate2cReverseAtMs > 0 && MonotonicMs() >= _gate2cReverseAtAbsoluteMs)
+            {
+                _gate2cReversed = true;
+                var api = BotControllerCap.Get();
+                if (api is not null && _activeMovement.TryGetValue(_gate2cSlot, out var reverseId))
+                {
+                    try
+                    {
+                        api.UpdateUsercmdMovement(_gate2cSlot, reverseId, -_gate2cForwardMove, -_gate2cLeftMove);
+                        Log($"[gate2c] reversal applied at t={MonotonicMs()} (elapsed={MonotonicMs() - _gate2cStartMs}ms): " +
+                            $"forward {_gate2cForwardMove:F4}->{-_gate2cForwardMove:F4}, left {_gate2cLeftMove:F4}->{-_gate2cLeftMove:F4}.");
+                    }
+                    catch (Exception ex) { Log($"[gate2c] reversal UpdateUsercmdMovement threw {ex.GetType().Name}: {ex.Message}"); }
+                }
+                else
+                {
+                    Log("[gate2c] reversal requested but no active movement id was found -- skipped.");
+                }
+            }
+
             if (MonotonicMs() >= _gate2cDeadlineMs)
             {
                 _gate2cActive = false;
@@ -346,7 +450,9 @@ public sealed class PocHarnessPlugin : BasePlugin
         if (_gate2cPostCancelActive && _gate2cPawn is not null)
         {
             var (ok, origin, eye, _) = ReadPawnState(_gate2cPawn);
-            if (ok) _gate2cPostCancelSamples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z, eye!.X, eye.Y));
+            var (velOk, velocity, _) = ReadPawnVelocity(_gate2cPawn);
+            if (ok) _gate2cPostCancelSamples.Add((MonotonicMs(), origin!.X, origin.Y, origin.Z, eye!.X, eye.Y,
+                velOk, velocity?.X ?? 0f, velocity?.Y ?? 0f, velocity?.Z ?? 0f));
             if (MonotonicMs() >= _gate2cPostCancelDeadlineMs)
             {
                 _gate2cPostCancelActive = false;
@@ -354,6 +460,8 @@ public sealed class PocHarnessPlugin : BasePlugin
             }
         }
     }
+
+    private static float VectorMagnitude(Vector v) => MathF.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
 
     // Cancels HOS movement, marks the native diagnostic phase transition, and
     // begins the bounded still-locked post-cancel observation window. Capture
@@ -469,7 +577,7 @@ public sealed class PocHarnessPlugin : BasePlugin
     // and Gate2C native logs. Entirely separate state/fields from css_poc_gate2
     // above -- that command is untouched.
     [ConsoleCommand("css_poc_gate2c", "GATE2C: like GATE2, but also writes movement directly into CMoveData in ProcessMovement (diagnostic-only, explicit writeScale)")]
-    [CommandHelper(minArgs: 3, usage: "<slot> <durationMs> <writeScale> [lockMode: all|aim, default all] [gate2cOnly: true|false, default false]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    [CommandHelper(minArgs: 3, usage: "<slot> <durationMs> <writeScale> [lockMode: all|aim, default all] [gate2cOnly: true|false, default false] [forwardMove, default 1.0] [leftMove, default 0.0] [reverseAtMs, default disabled] [waitForRestMs, default disabled]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnGate2C(CCSPlayerController? caller, CommandInfo cmd)
     {
         if (!int.TryParse(cmd.GetArg(1), out var slot) || !int.TryParse(cmd.GetArg(2), out var durationMs))
@@ -512,6 +620,36 @@ public sealed class PocHarnessPlugin : BasePlugin
             return;
         }
 
+        // ---- New, all-optional args. Every default below reproduces today's
+        // exact behavior when omitted -- backward compatible by construction.
+        float forwardMove = 1.0f;
+        var forwardMoveArg = cmd.GetArg(6);
+        if (!string.IsNullOrWhiteSpace(forwardMoveArg) && (!float.TryParse(forwardMoveArg, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out forwardMove) || !float.IsFinite(forwardMove)))
+        { Log("[gate2c] bad forwardMove arg -- must be a finite number, e.g. 1.0 or -1.0 (omit for default 1.0)"); return; }
+
+        float leftMove = 0.0f;
+        var leftMoveArg = cmd.GetArg(7);
+        if (!string.IsNullOrWhiteSpace(leftMoveArg) && (!float.TryParse(leftMoveArg, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out leftMove) || !float.IsFinite(leftMove)))
+        { Log("[gate2c] bad leftMove arg -- must be a finite number, e.g. 1.0 or -1.0 (omit for default 0.0)"); return; }
+
+        int reverseAtMs = -1;
+        var reverseAtMsArg = cmd.GetArg(8);
+        if (!string.IsNullOrWhiteSpace(reverseAtMsArg))
+        {
+            if (!int.TryParse(reverseAtMsArg, out reverseAtMs) || reverseAtMs <= 0 || reverseAtMs >= durationMs)
+            { Log("[gate2c] bad reverseAtMs arg -- must be a positive integer strictly less than durationMs (omit to disable reversal)"); return; }
+        }
+
+        int waitForRestMs = 0;
+        var waitForRestMsArg = cmd.GetArg(9);
+        if (!string.IsNullOrWhiteSpace(waitForRestMsArg))
+        {
+            if (!int.TryParse(waitForRestMsArg, out waitForRestMs) || waitForRestMs < 0)
+            { Log("[gate2c] bad waitForRestMs arg -- must be a non-negative integer (0 or omit disables the rest-wait)"); return; }
+        }
+
         var api = BotControllerCap.Get();
         if (api is null) { Log("[gate2c] FAIL: capability not available (run gate1 first)"); return; }
         var controller = ResolveSlot(slot);
@@ -525,11 +663,77 @@ public sealed class PocHarnessPlugin : BasePlugin
             : $"[gate2c] PRE read FAILED: {detailPre} -- aborting, cannot establish baseline");
         if (!okPre) return;
 
-        // Start Gate2B's window first (same non-fatal-on-failure behavior as
-        // css_poc_gate2 itself: Gate2C's own hypothesis does not depend on it),
-        // then Gate2C's own window, which IS fatal on failure -- writing
-        // CMoveData with no reliable native capture active would produce a
-        // result with no way to check it.
+        if (waitForRestMs <= 0)
+        {
+            // Fast path: identical sequencing to before this change (Gate2B
+            // Start -> Gate2C Start -> Lock -> StartUsercmdMovement), entirely
+            // inside StartGate2CDiagnostic with preLockedResult=null.
+            StartGate2CDiagnostic(slot, durationMs, writeScale, lockKind, gate2cOnly, forwardMove, leftMove,
+                reverseAtMs, pawn, preLockedResult: null);
+            return;
+        }
+
+        // Rest-wait path: Lock now, BEFORE Gate2B/Gate2C Start and before any
+        // movement injection, so AI stops making new decisions and residual
+        // momentum can decay via ordinary friction while we wait. Only
+        // reachable when the caller explicitly opts in via waitForRestMs -- no
+        // existing invocation without this argument is affected.
+        bool locked;
+        try { locked = api.Lock(slot, lockKind); }
+        catch (Exception ex) { Log($"[gate2c] Lock threw {ex.GetType().Name}: {ex.Message}"); return; }
+        Log($"[gate2c] Lock({lockKind}) accepted={locked}");
+
+        _gate2cWaitSlot = slot;
+        _gate2cWaitPawn = pawn;
+        _gate2cWaitLockKind = lockKind;
+        _gate2cWaitLocked = locked;
+        _gate2cWaitDurationMs = durationMs;
+        _gate2cWaitWriteScale = writeScale;
+        _gate2cWaitGate2cOnly = gate2cOnly;
+        _gate2cWaitForwardMove = forwardMove;
+        _gate2cWaitLeftMove = leftMove;
+        _gate2cWaitReverseAtMs = reverseAtMs;
+        _gate2cWaitRestTicks = 0;
+        _gate2cWaitDeadlineMs = MonotonicMs() + waitForRestMs;
+        _gate2cWaitingForRest = true;
+        Log($"[gate2c] waiting up to {waitForRestMs}ms for slot {slot} to reach rest (|velocity| < " +
+            $"{Gate2CRestVelocityThreshold} u/s for {Gate2CRestConsecutiveTicksRequired} consecutive ticks) before " +
+            "starting capture. Call css_poc_stop early to abort this wait too.");
+    }
+
+    // Shared continuation for both OnGate2C's fast path (preLockedResult=null:
+    // this function performs Lock itself, in the exact same position in the
+    // sequence -- after Gate2C DiagnosticStart -- as before this change) and
+    // the rest-wait path (preLockedResult=the already-obtained Lock result:
+    // Lock is skipped here since the caller already did it earlier). Every
+    // failure/exception path below unlocks (when locked) and finalizes both
+    // native diagnostics (when they were started) before returning -- no exit
+    // path leaves the lock held or a diagnostic un-finalized.
+    private void StartGate2CDiagnostic(int slot, int durationMs, float writeScale, LockKind lockKind, bool gate2cOnly,
+        float forwardMove, float leftMove, int reverseAtMs, CCSPlayerPawn pawn, bool? preLockedResult)
+    {
+        var api = BotControllerCap.Get();
+        if (api is null)
+        {
+            // preLockedResult != null means a Lock call already succeeded (or was
+            // attempted) earlier, via a DIFFERENT api reference (the rest-wait
+            // setup in OnGate2C, which may have run up to waitForRestMs ago) --
+            // if the capability is gone now, there is no api object left to call
+            // Unlock on through this path. This is a real, narrow gap: unlike the
+            // fast path (Lock and Start share one api reference within a single
+            // call), the rest-wait path's Lock and this continuation are separate
+            // calls with a real time gap between them. Not silently swallowed:
+            // logged distinctly so a stuck-locked bot has a clear cause in the log
+            // rather than the generic capability-unavailable message.
+            if (preLockedResult == true)
+                Log($"[gate2c] FAIL: capability not available (run gate1 first) -- slot {slot} may STILL BE LOCKED " +
+                    $"from the earlier rest-wait Lock({lockKind}) call and cannot be released via this path; " +
+                    "retry css_poc_stop once the capability is available again.");
+            else
+                Log("[gate2c] FAIL: capability not available (run gate1 first)");
+            return;
+        }
+
         System.Threading.Interlocked.Exchange(ref _gate2FinalizedGuard, 0);
         int startStatusB;
         try { startStatusB = BotController_Gate2BDiagnosticStart(slot); }
@@ -542,31 +746,40 @@ public sealed class PocHarnessPlugin : BasePlugin
         catch (Exception ex)
         {
             Log($"[gate2c] Gate2C DiagnosticStart threw {ex.GetType().Name}: {ex.Message} -- aborting.");
+            if (preLockedResult == true) { try { api.Unlock(slot, lockKind); } catch { /* diagnostic-only, fail soft */ } }
             TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
             return;
         }
         if (startStatusC != 0)
         {
             Log($"[gate2c] Gate2C DiagnosticStart returned status={startStatusC} (0=OK, 2=INVALID_SLOT, 3=BUSY) -- aborting rather than writing CMoveData with no reliable capture active.");
+            if (preLockedResult == true) { try { api.Unlock(slot, lockKind); } catch { /* diagnostic-only, fail soft */ } }
             TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
             return;
         }
         Log($"[gate2c] Gate2C capture started, writeScale={writeScale} (explicit, experimental).");
 
         bool locked;
-        try { locked = api.Lock(slot, lockKind); }
-        catch (Exception ex)
+        if (preLockedResult is bool already)
         {
-            Log($"[gate2c] Lock threw {ex.GetType().Name}: {ex.Message}");
-            TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
-            return;
+            locked = already;
         }
-        Log($"[gate2c] Lock({lockKind}) accepted={locked}");
+        else
+        {
+            try { locked = api.Lock(slot, lockKind); }
+            catch (Exception ex)
+            {
+                Log($"[gate2c] Lock threw {ex.GetType().Name}: {ex.Message}");
+                TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
+                return;
+            }
+            Log($"[gate2c] Lock({lockKind}) accepted={locked}");
+        }
 
         long movementId;
         try { movementId = gate2cOnly
-            ? BotController_StartUsercmdMovementGate2COnly(slot, 1.0f, 0.0f, checked((int)(durationMs + Gate2PostCancelDurationMs + 2000)))
-            : api.StartUsercmdMovement(slot, forwardMove: 1.0f, leftMove: 0.0f); }
+            ? BotController_StartUsercmdMovementGate2COnly(slot, forwardMove, leftMove, checked((int)(durationMs + Gate2PostCancelDurationMs + 2000)))
+            : api.StartUsercmdMovement(slot, forwardMove, leftMove); }
         catch (Exception ex)
         {
             Log($"[gate2c] StartUsercmdMovement threw {ex.GetType().Name}: {ex.Message}");
@@ -587,20 +800,68 @@ public sealed class PocHarnessPlugin : BasePlugin
         _gate2cSlot = slot;
         _gate2cPawn = pawn;
         _gate2cLockKind = lockKind;
-        _gate2cDeadlineMs = MonotonicMs() + durationMs;
+        _gate2cStartMs = MonotonicMs();
+        _gate2cDeadlineMs = _gate2cStartMs + durationMs;
+        _gate2cForwardMove = forwardMove;
+        _gate2cLeftMove = leftMove;
+        _gate2cReverseAtMs = reverseAtMs;
+        _gate2cReverseAtAbsoluteMs = reverseAtMs > 0 ? _gate2cStartMs + reverseAtMs : long.MaxValue;
+        _gate2cReversed = false;
+        _gate2cRoundTransitionCounterAtStart = _roundTransitionCounter;
         _gate2cActive = true;
-        Log($"[gate2c] sampling started for {durationMs}ms with lockKind={lockKind}, writeScale={writeScale}. " +
-            $"Call css_poc_stop {slot} early if needed; otherwise it self-stops and logs the full trace.");
+        Log($"[gate2c] sampling started for {durationMs}ms with lockKind={lockKind}, writeScale={writeScale}, " +
+            $"forwardMove={forwardMove:F4}, leftMove={leftMove:F4}" +
+            (reverseAtMs > 0 ? $", reverseAtMs={reverseAtMs}" : "") +
+            $". Call css_poc_stop {slot} early if needed; otherwise it self-stops and logs the full trace.");
     }
 
-    private readonly List<(long tMs, float x, float y, float z, float pitch, float yaw)> _gate2cSamples = new();
+    // velOk/velX/velY/velZ are the independent entity-velocity read (AbsVelocity,
+    // via ReadPawnVelocity) -- separate from and cross-checkable against
+    // Gate2C's own native CMoveData postVel readback in the BotController log.
+    private readonly List<(long tMs, float x, float y, float z, float pitch, float yaw, bool velOk, float velX, float velY, float velZ)> _gate2cSamples = new();
     private bool _gate2cActive;
     private int _gate2cSlot;
     private CCSPlayerPawn? _gate2cPawn;
     private LockKind _gate2cLockKind;
     private long _gate2cDeadlineMs;
+    private long _gate2cStartMs;
 
-    private readonly List<(long tMs, float x, float y, float z, float pitch, float yaw)> _gate2cPostCancelSamples = new();
+    // Reversal (mid-run direction flip via the existing, unmodified native
+    // UpdateUsercmdMovement -- see IBotControllerApi.UpdateUsercmdMovement):
+    // reverseAtMs<=0 disables it entirely, preserving today's behavior.
+    private float _gate2cForwardMove;
+    private float _gate2cLeftMove;
+    private int _gate2cReverseAtMs;
+    private long _gate2cReverseAtAbsoluteMs;
+    private bool _gate2cReversed;
+
+    // Round-transition detection: sampled at StartGate2CDiagnostic and compared
+    // at finalize. A mismatch means a round boundary happened during this run
+    // and the result should be treated as confounded, not silently trusted.
+    private long _gate2cRoundTransitionCounterAtStart;
+
+    // Rest-wait (starting from rest): deferred continuation state. Lock is
+    // already held by the time this phase is active (see OnGate2C) --
+    // OnStop's existing unconditional Unlock(All)/Unlock(Aim) fail-safe
+    // already covers releasing it if a manual stop happens mid-wait; this
+    // phase's own timeout path releases it too (see OnTick).
+    private const float Gate2CRestVelocityThreshold = 5.0f; // units/sec
+    private const int Gate2CRestConsecutiveTicksRequired = 8;
+    private bool _gate2cWaitingForRest;
+    private int _gate2cWaitSlot;
+    private CCSPlayerPawn? _gate2cWaitPawn;
+    private LockKind _gate2cWaitLockKind;
+    private bool _gate2cWaitLocked;
+    private int _gate2cWaitDurationMs;
+    private float _gate2cWaitWriteScale;
+    private bool _gate2cWaitGate2cOnly;
+    private float _gate2cWaitForwardMove;
+    private float _gate2cWaitLeftMove;
+    private int _gate2cWaitReverseAtMs;
+    private long _gate2cWaitDeadlineMs;
+    private int _gate2cWaitRestTicks;
+
+    private readonly List<(long tMs, float x, float y, float z, float pitch, float yaw, bool velOk, float velX, float velY, float velZ)> _gate2cPostCancelSamples = new();
     private bool _gate2cPostCancelActive;
     private long _gate2cPostCancelDeadlineMs;
 
@@ -671,7 +932,8 @@ public sealed class PocHarnessPlugin : BasePlugin
 
         Log($"[gate2c] pre-cancel sample count={_gate2cSamples.Count} lockKind={_gate2cLockKind}");
         foreach (var s in _gate2cSamples)
-            Log($"[gate2c] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4})");
+            Log($"[gate2c] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4}) " +
+                (s.velOk ? $"vel=({s.velX:F4},{s.velY:F4},{s.velZ:F4})" : "vel=unreadable"));
         if (_gate2cSamples.Count >= 2)
         {
             var first = _gate2cSamples[0]; var last = _gate2cSamples[^1];
@@ -680,11 +942,57 @@ public sealed class PocHarnessPlugin : BasePlugin
                 "As with gate2, this net figure alone does not establish sustained movement -- inspect the native " +
                 "Gate2C log's per-invocation PRE/INJECTED/POST velocity and origin across the SteadyState phase " +
                 "specifically, not just this harness-side first/last displacement.");
+
+            // Independent entity-velocity cross-check (AbsVelocity, via
+            // ReadPawnVelocity) against the native CMoveData postVel readback --
+            // a separate measurement path, not a replacement for either. See
+            // ReadPawnVelocity's own comment on why AbsVelocity's exact
+            // semantics here are not yet independently verified the way
+            // CMoveData's offsets are.
+            if (first.velOk && last.velOk)
+            {
+                var firstSpeed = MathF.Sqrt(first.velX * first.velX + first.velY * first.velY + first.velZ * first.velZ);
+                var lastSpeed = MathF.Sqrt(last.velX * last.velX + last.velY * last.velY + last.velZ * last.velZ);
+                Log($"[gate2c] entity-velocity (AbsVelocity, independent of CMoveData readback): " +
+                    $"first={firstSpeed:F4} u/s last={lastSpeed:F4} u/s -- cross-check this against the native " +
+                    "log's postVel for the same PRE/POST phase before treating either alone as authoritative.");
+            }
+
+            // Heuristic-only collision/discontinuity flags. Never gates or
+            // changes anything else in this test -- purely an annotation for
+            // the reader, explicitly not a certain detector.
+            for (int i = 1; i < _gate2cSamples.Count; i++)
+            {
+                var a = _gate2cSamples[i - 1];
+                var b = _gate2cSamples[i];
+                if (!a.velOk || !b.velOk) continue;
+                bool nearReversalTick = _gate2cReverseAtMs > 0 && Math.Abs(b.tMs - (_gate2cStartMs + _gate2cReverseAtMs)) < 100;
+                var speedA = MathF.Sqrt(a.velX * a.velX + a.velY * a.velY + a.velZ * a.velZ);
+                var speedB = MathF.Sqrt(b.velX * b.velX + b.velY * b.velY + b.velZ * b.velZ);
+                if (!nearReversalTick && speedA > 20f && speedB < speedA * 0.5f)
+                {
+                    Log($"[heuristic] possible collision/obstruction at t={b.tMs}: entity speed dropped from " +
+                        $"{speedA:F4} to {speedB:F4} u/s between consecutive samples with no intentional reversal " +
+                        "nearby -- not a confirmed collision, a plausibility flag only.");
+                }
+                if (MathF.Abs(b.z - a.z) > 20f)
+                {
+                    Log($"[heuristic] possible geometry step/fall at t={b.tMs}: Z origin changed by {b.z - a.z:F4} " +
+                        "units between consecutive samples -- not a confirmed cause, a plausibility flag only.");
+                }
+            }
+        }
+
+        if (_gate2cRoundTransitionCounterAtStart != _roundTransitionCounter)
+        {
+            Log($"[gate2c] WARNING: a round transition occurred during this run ({_gate2cRoundTransitionCounterAtStart} " +
+                $"-> {_roundTransitionCounter} round-start/end events) -- treat this result as potentially confounded.");
         }
 
         Log($"[gate2c] post-cancel (still locked) sample count={_gate2cPostCancelSamples.Count}");
         foreach (var s in _gate2cPostCancelSamples)
-            Log($"[gate2c] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4})");
+            Log($"[gate2c] t={s.tMs} pos=({s.x:F4},{s.y:F4},{s.z:F4}) eye=(pitch={s.pitch:F4},yaw={s.yaw:F4}) " +
+                (s.velOk ? $"vel=({s.velX:F4},{s.velY:F4},{s.velZ:F4})" : "vel=unreadable"));
         if (_gate2cPostCancelSamples.Count >= 2)
         {
             var steps = new List<float>();
@@ -871,6 +1179,19 @@ public sealed class PocHarnessPlugin : BasePlugin
         if (wasGate2cActive || slot == _gate2cSlot)
         {
             TryFinalizeBothGate2CDiagnostics(slot, aborted: true);
+        }
+
+        // Rest-wait: no diagnostic or movement was ever started in this phase
+        // (that only happens once OnTick's rest-wait block hands off to
+        // StartGate2CDiagnostic), so there is nothing to finalize here -- just
+        // stop the pending continuation from firing. The lock taken when the
+        // wait began is released by the unconditional Unlock(All)/Unlock(Aim)
+        // calls below regardless of which slot's wait this was, same as every
+        // other phase this method already covers.
+        if (_gate2cWaitingForRest && slot == _gate2cWaitSlot)
+        {
+            _gate2cWaitingForRest = false;
+            Log($"[stop] aborted pending rest-wait for slot {slot}");
         }
 
         if (api is null) { Log("[stop] capability unavailable, nothing to cancel via API (local sampling state cleared)"); return; }

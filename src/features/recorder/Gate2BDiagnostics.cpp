@@ -56,6 +56,7 @@ struct PrcSample
     bool hasBase = false; // false => fwd/side/subtick below are placeholders, not observations
     float fwdBefore = 0, sideBefore = 0, fwdAfter = 0, sideAfter = 0;
     int subtickCountBefore = 0;
+    uint64_t heldMaskBefore = 0, heldMaskAfter = 0; // raw, uninterpreted -- see header comment
 };
 
 struct PmSample
@@ -248,17 +249,20 @@ void LogPrcSample(int slot, const char* bucket, const PrcSample& s)
     {
         BC_LOG_INFO(
             "[gate2b][slot=%d][prc][%s] w=%u phase=%s pmSeq=%u cmdNum=%d hasUsercmdMovement=%d hasBase=0 "
+            "heldMaskBefore=0x%016llX heldMaskAfter=0x%016llX "
             "(no base submessage -- fwd/side/subtick below are NOT observations)\n",
             slot, bucket, s.windowSeq, PhaseName(s.phase), s.physicsSimulateSeq, s.cmdNum,
-            s.hasUsercmdMovementObserved ? 1 : 0);
+            s.hasUsercmdMovementObserved ? 1 : 0, static_cast<unsigned long long>(s.heldMaskBefore),
+            static_cast<unsigned long long>(s.heldMaskAfter));
         return;
     }
     BC_LOG_INFO(
         "[gate2b][slot=%d][prc][%s] w=%u phase=%s pmSeq=%u cmdNum=%d hasUsercmdMovement=%d hasBase=1 "
-        "fwd=%.4f->%.4f side=%.4f->%.4f subtickBefore=%d\n",
+        "fwd=%.4f->%.4f side=%.4f->%.4f subtickBefore=%d heldMaskBefore=0x%016llX heldMaskAfter=0x%016llX\n",
         slot, bucket, s.windowSeq, PhaseName(s.phase), s.physicsSimulateSeq, s.cmdNum,
         s.hasUsercmdMovementObserved ? 1 : 0, s.fwdBefore, s.fwdAfter, s.sideBefore, s.sideAfter,
-        s.subtickCountBefore);
+        s.subtickCountBefore, static_cast<unsigned long long>(s.heldMaskBefore),
+        static_cast<unsigned long long>(s.heldMaskAfter));
 }
 
 void LogPmSample(int slot, const char* bucket, const PmSample& s)
@@ -493,7 +497,8 @@ uint32_t CurrentPhysicsSimulateSeq(int slot)
 
 void RecordPlayerRunCommandObservation(int slot, uint32_t physicsSimulateSeq, int64_t nowMs, int cmdNum,
                                         bool hasUsercmdMovementObserved, bool hasBase, float fwdBefore,
-                                        float sideBefore, float fwdAfter, float sideAfter, int subtickCountBefore)
+                                        float sideBefore, float fwdAfter, float sideAfter, int subtickCountBefore,
+                                        uint64_t heldMaskBefore, uint64_t heldMaskAfter)
 {
     if (!ValidSlot(slot)) return;
     SlotState& st = g_state[slot];
@@ -521,7 +526,7 @@ void RecordPlayerRunCommandObservation(int slot, uint32_t physicsSimulateSeq, in
     }
 
     PrcSample s{ w, phase, physicsSimulateSeq, cmdNum, hasUsercmdMovementObserved, hasBase,
-                 fwdBefore, sideBefore, fwdAfter, sideAfter, subtickCountBefore };
+                 fwdBefore, sideBefore, fwdAfter, sideAfter, subtickCountBefore, heldMaskBefore, heldMaskAfter };
     PrcBuffers& buf = g_prcBuf[slot];
     uint32_t idx = 0;
     switch (phase)

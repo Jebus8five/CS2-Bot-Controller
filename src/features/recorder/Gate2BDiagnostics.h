@@ -88,9 +88,21 @@ uint32_t CurrentPhysicsSimulateSeq(int slot);
 // for the before/after/subtick fields when hasBase is false, and this
 // function preserves that distinction in the recorded sample rather than
 // treating an absent base as an observed zero.
+//
+// heldMaskBefore/heldMaskAfter are the raw pc->buttonstates.m_pButtonStates[0]
+// value (the same held-button mask ApplyUsercmdMovement already reads/writes
+// in InputInjector.cpp), read before and after the production branch,
+// independent of hasBase. This is a RAW, uninterpreted 64-bit mask: no bit
+// position here is asserted to mean anything (in particular, no bit is
+// asserted to be a "walk"/IN_SPEED indicator) -- only kInForward=1<<3,
+// kInBack=1<<4, kInMoveLeft=1<<9, kInMoveRight=1<<10, and the grenade-related
+// (1<<0)|(1<<11) mask are independently verified in this codebase today (see
+// InputInjector.cpp). Any other bit read from this field is a hypothesis to
+// be tested against logged data, not a fact encoded here.
 void RecordPlayerRunCommandObservation(int slot, uint32_t physicsSimulateSeq, int64_t nowMs, int cmdNum,
                                         bool hasUsercmdMovementObserved, bool hasBase, float fwdBefore,
-                                        float sideBefore, float fwdAfter, float sideAfter, int subtickCountBefore);
+                                        float sideBefore, float fwdAfter, float sideAfter, int subtickCountBefore,
+                                        uint64_t heldMaskBefore, uint64_t heldMaskAfter);
 
 // Detailed observation from HookedProcessMovement's pre-hook, once the
 // second argument (CMoveData*, independently verified this session via its
