@@ -41,6 +41,14 @@
 //                                                entity velocity to settle near zero before
 //                                                starting capture at all -- see StartGate2CDiagnostic.
 //   css_poc_gate3 <slot> <pitch> <yaw> <ms>  -- DISABLED, see comment above OnGate3 and README
+//   css_poc_teleport <slot> <x> <y> <z> <pitch> <yaw> [roll]
+//                                             -- teleports a bot to exact coordinates/orientation
+//                                                with zero velocity, via CounterStrikeSharp's own
+//                                                CBaseEntity.Teleport -- independent of Gate3/replay
+//                                                and of BotController's own native Teleport export.
+//                                                Isolated-server-only (checked once at Load() via
+//                                                ModuleDirectory, fails closed); refuses while a
+//                                                Gate2C session or rest-wait is active.
 //   css_poc_stop <slot>                     -- cancel all injections/locks/replay for slot, unlock
 
 using System.Runtime.InteropServices;
@@ -119,7 +127,29 @@ public sealed class PocHarnessPlugin : BasePlugin
     {
         _logPath = Path.Combine(ModuleDirectory, "poc-harness.log");
         Log($"[load] PocHarnessPlugin loaded. hotReload={hotReload}");
+
+        // css_poc_teleport gate: verified once here, at load time, by checking
+        // this plugin's own on-disk install path for a marker unique to the
+        // isolated test server -- not a runtime cvar/hostname read, so it
+        // cannot be spoofed by anything the server console can change, and it
+        // uses only ModuleDirectory, a property already relied on above. Any
+        // failure of this check (missing property, unexpected exception)
+        // defaults _isolatedEnvironmentConfirmed to false -- fail closed, not
+        // fail open.
+        try
+        {
+            _isolatedEnvironmentConfirmed = !string.IsNullOrEmpty(ModuleDirectory) &&
+                ModuleDirectory.IndexOf("CS2IsolatedBCTest", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch (Exception ex)
+        {
+            _isolatedEnvironmentConfirmed = false;
+            Log($"[load] isolated-environment check threw {ex.GetType().Name}: {ex.Message} -- failing closed (css_poc_teleport disabled).");
+        }
+        Log($"[load] isolated-environment check: ModuleDirectory={ModuleDirectory} confirmed={_isolatedEnvironmentConfirmed}");
     }
+
+    private bool _isolatedEnvironmentConfirmed;
 
     private void Log(string line)
     {
@@ -216,6 +246,97 @@ public sealed class PocHarnessPlugin : BasePlugin
             ? $"[baseline] slot={slot} origin=({origin!.X:F4},{origin.Y:F4},{origin.Z:F4}) eye=({eye!.X:F4},{eye.Y:F4},{eye.Z:F4})"
             : $"[baseline] slot={slot} read FAILED: {detail}");
     }
+
+    // ---- Bot positioning for controlled movement tests. Uses only
+    // CounterStrikeSharp's own public CBaseEntity.Teleport(Vector, QAngle,
+    // Vector) -- confirmed present in the referenced API assembly, documented
+    // as teleporting an entity to an explicit position/angles/velocity. Does
+    // NOT touch BotController's own native Teleport export, MotionRecorder's
+    // disabled Gate3/replay path, or any BotController state at all -- this
+    // is a pure CounterStrikeSharp API call on the pawn CS# already hands us
+    // via ResolveSlot, same as every other command in this file. ----
+    [ConsoleCommand("css_poc_teleport", "Teleport a bot to exact coordinates/orientation with zero velocity (diagnostic-only, isolated-server-only)")]
+    [CommandHelper(minArgs: 6, usage: "<slot> <x> <y> <z> <pitch> <yaw> [roll, default 0]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnTeleport(CCSPlayerController? caller, CommandInfo cmd)
+    {
+        if (!_isolatedEnvironmentConfirmed)
+        {
+            Log($"[teleport] REFUSED: isolated-server environment not confirmed (ModuleDirectory={ModuleDirectory}) -- failing closed.");
+            return;
+        }
+
+        // Deliberately checked, never set, by this command -- teleport never
+        // touches these flags, so it cannot leave the Gate2C admission guard
+        // (added for css_poc_gate2c) stuck in any way.
+        if (_gate2cWaitingForRest || _gate2cActive || _gate2cPostCancelActive)
+        {
+            int busySlot = _gate2cWaitingForRest ? _gate2cWaitSlot : _gate2cSlot;
+            Log($"[teleport] REJECTED: a Gate2C session (or pending rest-wait) is active on slot {busySlot} -- " +
+                $"call css_poc_stop {busySlot} first, or wait for it to finish.");
+            return;
+        }
+
+        if (_teleportVerifyPending)
+        {
+            Log($"[teleport] REJECTED: a previous teleport on slot {_teleportVerifySlot} is still being verified -- try again shortly.");
+            return;
+        }
+
+        if (!int.TryParse(cmd.GetArg(1), out var slot))
+        { Log("[teleport] bad slot arg"); return; }
+
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var style = System.Globalization.NumberStyles.Float;
+        if (!float.TryParse(cmd.GetArg(2), style, culture, out var x) || !float.IsFinite(x) ||
+            !float.TryParse(cmd.GetArg(3), style, culture, out var y) || !float.IsFinite(y) ||
+            !float.TryParse(cmd.GetArg(4), style, culture, out var z) || !float.IsFinite(z) ||
+            !float.TryParse(cmd.GetArg(5), style, culture, out var pitch) || !float.IsFinite(pitch) ||
+            !float.TryParse(cmd.GetArg(6), style, culture, out var yaw) || !float.IsFinite(yaw))
+        { Log("[teleport] bad x/y/z/pitch/yaw arg -- all must be finite numbers"); return; }
+
+        float roll = 0.0f;
+        var rollArg = cmd.GetArg(7);
+        if (!string.IsNullOrWhiteSpace(rollArg) && (!float.TryParse(rollArg, style, culture, out roll) || !float.IsFinite(roll)))
+        { Log("[teleport] bad roll arg -- must be a finite number (omit for default 0.0)"); return; }
+
+        var controller = ResolveSlot(slot);
+        if (controller is null || !controller.IsBot) { Log($"[teleport] slot {slot} is not a live bot"); return; }
+        var pawn = controller.PlayerPawn?.Value;
+        if (pawn is null) { Log($"[teleport] slot {slot} has no pawn"); return; }
+
+        var (okPre, originPre, eyePre, detailPre) = ReadPawnState(pawn);
+        Log(okPre
+            ? $"[teleport] PRE origin=({originPre!.X:F4},{originPre.Y:F4},{originPre.Z:F4}) eye=({eyePre!.X:F4},{eyePre.Y:F4})"
+            : $"[teleport] PRE read FAILED: {detailPre} -- proceeding anyway, teleport does not depend on a successful pre-read");
+
+        Log($"[teleport] requesting slot={slot} pos=({x:F4},{y:F4},{z:F4}) angles=(pitch={pitch:F4},yaw={yaw:F4},roll={roll:F4}) velocity=(0,0,0)");
+
+        try
+        {
+            pawn.Teleport(new Vector(x, y, z), new QAngle(pitch, yaw, roll), new Vector(0f, 0f, 0f));
+        }
+        catch (Exception ex)
+        {
+            Log($"[teleport] Teleport threw {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        // Verify a few ticks later, after the engine has actually processed
+        // the teleport -- not synchronously in this same frame, since a
+        // same-frame readback could still show pre-teleport state.
+        _teleportVerifySlot = slot;
+        _teleportVerifyPawn = pawn;
+        _teleportVerifyRequested = (x, y, z, pitch, yaw, roll);
+        _teleportVerifyTicksRemaining = TeleportVerifyDelayTicks;
+        _teleportVerifyPending = true;
+    }
+
+    private const int TeleportVerifyDelayTicks = 3;
+    private bool _teleportVerifyPending;
+    private int _teleportVerifySlot;
+    private CCSPlayerPawn? _teleportVerifyPawn;
+    private (float x, float y, float z, float pitch, float yaw, float roll) _teleportVerifyRequested;
+    private int _teleportVerifyTicksRemaining;
 
     // ---- GATE 2: movement ----
     private readonly Dictionary<int, long> _activeMovement = new();
@@ -360,6 +481,29 @@ public sealed class PocHarnessPlugin : BasePlugin
 
     private void OnTick()
     {
+        if (_teleportVerifyPending && _teleportVerifyPawn is not null)
+        {
+            _teleportVerifyTicksRemaining--;
+            if (_teleportVerifyTicksRemaining <= 0)
+            {
+                _teleportVerifyPending = false;
+                var (ok, origin, eye, detail) = ReadPawnState(_teleportVerifyPawn);
+                var (velOk, velocity, velDetail) = ReadPawnVelocity(_teleportVerifyPawn);
+                var req = _teleportVerifyRequested;
+                if (ok)
+                {
+                    var posDelta = MathF.Sqrt(MathF.Pow(origin!.X - req.x, 2) + MathF.Pow(origin.Y - req.y, 2) + MathF.Pow(origin.Z - req.z, 2));
+                    Log($"[teleport] POST (after {TeleportVerifyDelayTicks} ticks) slot={_teleportVerifySlot} " +
+                        $"origin=({origin.X:F4},{origin.Y:F4},{origin.Z:F4}) eye=({eye!.X:F4},{eye.Y:F4},{eye.Z:F4}) " +
+                        $"posDeltaFromRequested={posDelta:F4} " +
+                        (velOk ? $"velocity=({velocity!.X:F4},{velocity.Y:F4},{velocity.Z:F4})" : $"velocity=unreadable:{velDetail}"));
+                }
+                else
+                {
+                    Log($"[teleport] POST read FAILED: {detail}");
+                }
+            }
+        }
         if (_gate2Active && _gate2Pawn is not null)
         {
             var (ok, origin, eye, _) = ReadPawnState(_gate2Pawn);
