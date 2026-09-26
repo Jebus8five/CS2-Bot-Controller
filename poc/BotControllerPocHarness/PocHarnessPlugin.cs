@@ -101,6 +101,9 @@ public sealed class PocHarnessPlugin : BasePlugin
     [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
     private static extern int BotController_Gate2CDiagnosticFinalize(int slot, int aborted);
 
+    [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+    private static extern long BotController_StartUsercmdMovementGate2COnly(int slot, float forwardMove, float leftMove, int maxDurationMs);
+
     public override void Load(bool hotReload)
     {
         _logPath = Path.Combine(ModuleDirectory, "poc-harness.log");
@@ -466,7 +469,7 @@ public sealed class PocHarnessPlugin : BasePlugin
     // and Gate2C native logs. Entirely separate state/fields from css_poc_gate2
     // above -- that command is untouched.
     [ConsoleCommand("css_poc_gate2c", "GATE2C: like GATE2, but also writes movement directly into CMoveData in ProcessMovement (diagnostic-only, explicit writeScale)")]
-    [CommandHelper(minArgs: 3, usage: "<slot> <durationMs> <writeScale> [lockMode: all|aim, default all]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    [CommandHelper(minArgs: 3, usage: "<slot> <durationMs> <writeScale> [lockMode: all|aim, default all] [gate2cOnly: true|false, default false]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnGate2C(CCSPlayerController? caller, CommandInfo cmd)
     {
         if (!int.TryParse(cmd.GetArg(1), out var slot) || !int.TryParse(cmd.GetArg(2), out var durationMs))
@@ -493,6 +496,19 @@ public sealed class PocHarnessPlugin : BasePlugin
         else
         {
             Log($"[gate2c] bad lockMode arg '{lockModeArg}' -- must be 'all' or 'aim' (omit for default 'all')");
+            return;
+        }
+
+        var gate2cOnlyArg = cmd.GetArg(5);
+        bool gate2cOnly = false;
+        if (!string.IsNullOrWhiteSpace(gate2cOnlyArg) && !bool.TryParse(gate2cOnlyArg, out gate2cOnly))
+        {
+            Log("[gate2c] bad gate2cOnly arg -- use true or false");
+            return;
+        }
+        if (gate2cOnly && (durationMs < 1 || (long)durationMs + Gate2PostCancelDurationMs + 2000 > 60000))
+        {
+            Log("[gate2c] gate2cOnly requires a positive duration with room for the post-cancel safety margin (max 57000ms)");
             return;
         }
 
@@ -548,7 +564,9 @@ public sealed class PocHarnessPlugin : BasePlugin
         Log($"[gate2c] Lock({lockKind}) accepted={locked}");
 
         long movementId;
-        try { movementId = api.StartUsercmdMovement(slot, forwardMove: 1.0f, leftMove: 0.0f); }
+        try { movementId = gate2cOnly
+            ? BotController_StartUsercmdMovementGate2COnly(slot, 1.0f, 0.0f, checked((int)(durationMs + Gate2PostCancelDurationMs + 2000)))
+            : api.StartUsercmdMovement(slot, forwardMove: 1.0f, leftMove: 0.0f); }
         catch (Exception ex)
         {
             Log($"[gate2c] StartUsercmdMovement threw {ex.GetType().Name}: {ex.Message}");

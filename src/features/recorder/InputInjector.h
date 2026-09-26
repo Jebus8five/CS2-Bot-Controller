@@ -42,6 +42,10 @@ bool CancelUsercmdInjection(int slot, int64_t injectionId);
 // Creates an independently cancellable persistent analog movement override
 int64_t StartUsercmdMovement(int slot, float forwardMove, float leftMove);
 
+// Diagnostic-only: same movement intent for ProcessMovement, but no PRC movement writes.
+// maxDurationMs is a lazy safety expiry; caller must cancel normally.
+int64_t StartUsercmdMovementGate2COnly(int slot, float forwardMove, float leftMove, int maxDurationMs);
+
 // Updates one persistent analog movement override
 bool UpdateUsercmdMovement(int slot, int64_t movementId, float forwardMove, float leftMove);
 

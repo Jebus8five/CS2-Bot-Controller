@@ -121,6 +121,7 @@ struct UsercmdMovement
     int64_t id;
     float forwardMove;
     float leftMove;
+    int64_t expiresAtMs = 0; // zero for ordinary persistent movement
 };
 
 struct UsercmdSuppression
@@ -135,6 +136,11 @@ struct UsercmdSuppression
 std::array<std::vector<UsercmdInjection>, kMaxSlots> g_usercmdInjections{};
 std::array<std::vector<UsercmdSuppression>, kMaxSlots> g_usercmdSuppressions{};
 std::array<std::vector<UsercmdMovement>, kMaxSlots> g_usercmdMovements{};
+// Exclusive per-slot diagnostic owner; guarded by g_usercmdInjectionMutex.
+// PRC holds that mutex throughout each movement write, so diagnostic start
+// cannot return while a previous PRC movement write is still in progress.
+struct Gate2COnlyOwner { int64_t movementId = 0; };
+std::array<Gate2COnlyOwner, kMaxSlots> g_gate2cOnlyOwners{};
 std::array<uint64_t, kMaxSlots> g_injectedHeldMasks{};
 std::array<uint64_t, kMaxSlots> g_movementHeldMasks{};
 std::mutex g_usercmdInjectionMutex;
@@ -184,11 +190,43 @@ int64_t StartUsercmdMovement(int slot, float forwardMove, float leftMove)
 
     int64_t id = g_nextUsercmdMovementId.fetch_add(1, std::memory_order_relaxed);
     std::scoped_lock lock(g_usercmdInjectionMutex);
-    if (motion_recorder::IsReplaying(slot)) return -1;
+    if (motion_recorder::IsReplaying(slot) || g_gate2cOnlyOwners[slot].movementId) return -1;
     g_usercmdMovements[slot].push_back(
         { .id = id, .forwardMove = std::clamp(forwardMove, -1.0F, 1.0F), .leftMove = std::clamp(leftMove, -1.0F, 1.0F) });
     return id;
 }
+
+// Starts a bounded, exclusive diagnostic movement session. Admission closes
+// before draining any PRC movement writes already in progress.
+int64_t StartUsercmdMovementGate2COnly(int slot, float forwardMove, float leftMove, int maxDurationMs)
+{
+    if (!ValidSlotIndex(slot) || !std::isfinite(forwardMove) || !std::isfinite(leftMove) ||
+        maxDurationMs < 1000 || maxDurationMs > 60000 || !g_subtickActive || motion_recorder::IsReplaying(slot)) return -1;
+    std::scoped_lock lock(g_usercmdInjectionMutex);
+    if (motion_recorder::IsReplaying(slot) || !g_usercmdMovements[slot].empty() ||
+        g_gate2cOnlyOwners[slot].movementId) return -1;
+    const int64_t id = g_nextUsercmdMovementId.fetch_add(1, std::memory_order_relaxed);
+    g_usercmdMovements[slot].push_back({ id, std::clamp(forwardMove, -1.0F, 1.0F),
+                                       std::clamp(leftMove, -1.0F, 1.0F), MonotonicMilliseconds() + maxDurationMs });
+    g_gate2cOnlyOwners[slot] = { id };
+    return id;
+}
+
+namespace {
+void ExpireGate2COnlyLocked(int slot)
+{
+    auto& owner = g_gate2cOnlyOwners[slot];
+    if (!owner.movementId) return;
+    auto& movements = g_usercmdMovements[slot];
+    auto it = std::find_if(movements.begin(), movements.end(),
+                           [&](const UsercmdMovement& m) { return m.id == owner.movementId; });
+    if (it == movements.end() || (it->expiresAtMs && MonotonicMilliseconds() >= it->expiresAtMs))
+    {
+        if (it != movements.end()) movements.erase(it);
+        owner = {};
+    }
+}
+} // namespace
 
 // Updates one persistent analog movement override
 bool UpdateUsercmdMovement(int slot, int64_t movementId, float forwardMove, float leftMove)
@@ -217,6 +255,7 @@ bool CancelUsercmdMovement(int slot, int64_t movementId)
     {
         if (it->id != movementId) continue;
         movements.erase(it);
+        if (g_gate2cOnlyOwners[slot].movementId == movementId) g_gate2cOnlyOwners[slot] = {};
         return true;
     }
     return false;
@@ -292,6 +331,7 @@ void ClearUsercmdInjections(int slot)
     g_usercmdInjections[slot].clear();
     g_usercmdSuppressions[slot].clear();
     g_usercmdMovements[slot].clear();
+    g_gate2cOnlyOwners[slot] = {};
     g_injectedHeldMasks[slot] = 0;
     g_movementHeldMasks[slot] = 0;
 }
@@ -304,6 +344,7 @@ struct UsercmdWork
     bool injection;
     bool suppression;
     bool movement;
+    bool suppressApply;
 };
 
 // Takes one consistent snapshot instead of locking once per input kind.
@@ -312,7 +353,9 @@ UsercmdWork GetUsercmdWork(int slot)
     if (!ValidSlotIndex(slot)) return {};
 
     std::scoped_lock lock(g_usercmdInjectionMutex);
-    return { !g_usercmdInjections[slot].empty(), !g_usercmdSuppressions[slot].empty(), !g_usercmdMovements[slot].empty() };
+    ExpireGate2COnlyLocked(slot);
+    return { !g_usercmdInjections[slot].empty(), !g_usercmdSuppressions[slot].empty(),
+             !g_usercmdMovements[slot].empty(), g_gate2cOnlyOwners[slot].movementId != 0 };
 }
 
 // Gate 2C: read-only peek at the SAME authoritative movement intent
@@ -325,6 +368,7 @@ bool PeekUsercmdMovement(int slot, float& forwardOut, float& leftOut)
 {
     if (!ValidSlotIndex(slot) || motion_recorder::IsReplaying(slot)) return false;
     std::scoped_lock lock(g_usercmdInjectionMutex);
+    ExpireGate2COnlyLocked(slot);
     if (g_usercmdMovements[slot].empty()) return false;
     const UsercmdMovement& m = g_usercmdMovements[slot].back();
     forwardOut = m.forwardMove;
@@ -337,15 +381,13 @@ bool ApplyUsercmdMovement(int slot, PlayerCommand* pc, CBaseUserCmdPB* base) // 
 {
     if (!ValidSlotIndex(slot) || pc == nullptr || base == nullptr) return false;
 
-    UsercmdMovement movement{};
-    uint64_t previousMask = 0;
-    {
-        std::scoped_lock lock(g_usercmdInjectionMutex);
-        const auto& movements = g_usercmdMovements[slot];
-        if (movements.empty()) return false;
-        movement = movements.back();
-        previousMask = g_movementHeldMasks[slot];
-    }
+    std::scoped_lock lock(g_usercmdInjectionMutex);
+    ExpireGate2COnlyLocked(slot);
+    if (g_gate2cOnlyOwners[slot].movementId) return false;
+    const auto& movements = g_usercmdMovements[slot];
+    if (movements.empty()) return false;
+    const UsercmdMovement movement = movements.back();
+    const uint64_t previousMask = g_movementHeldMasks[slot];
 
     uint64_t movementMask = 0;
     if (movement.forwardMove > 0.0F) movementMask |= kInForward;
@@ -355,10 +397,7 @@ bool ApplyUsercmdMovement(int slot, PlayerCommand* pc, CBaseUserCmdPB* base) // 
     else if (movement.leftMove < 0.0F)
         movementMask |= kInMoveRight;
 
-    {
-        std::scoped_lock lock(g_usercmdInjectionMutex);
-        g_movementHeldMasks[slot] = movementMask;
-    }
+    g_movementHeldMasks[slot] = movementMask;
 
     uint64_t pressedMask = movementMask & ~previousMask;
     uint64_t releasedMask = previousMask & ~movementMask;
@@ -846,7 +885,7 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
     auto* boundary = FindPhysicsFrame(slot);
     bool recording = boundary && boundary->recording && motion_recorder::IsRecording(slot);
     bool replaying = boundary && boundary->replaying && motion_recorder::IsReplaying(slot);
-    const auto [hasUsercmdInjection, hasUsercmdSuppression, hasUsercmdMovement] = replaying ? UsercmdWork{} : GetUsercmdWork(slot);
+    const auto [hasUsercmdInjection, hasUsercmdSuppression, hasUsercmdMovement, suppressApply] = replaying ? UsercmdWork{} : GetUsercmdWork(slot);
 
     if (cmd == nullptr)
     {
@@ -882,7 +921,7 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 
         if (hasUsercmdSuppression && !replaying) ApplyUsercmdSuppressions(slot, pc, base);
         if (hasUsercmdInjection && !replaying) ApplyUsercmdInjections(slot, pc, base);
-        if (hasUsercmdMovement && !replaying) ApplyUsercmdMovement(slot, pc, base);
+        if (hasUsercmdMovement && !replaying && !suppressApply) ApplyUsercmdMovement(slot, pc, base);
     }
 
     // Gate 2B diagnostic "after" snapshot: still read-only. If the production
@@ -1084,6 +1123,7 @@ void Remove()
             suppressions.clear();
         for (auto& movements : g_usercmdMovements)
             movements.clear();
+        g_gate2cOnlyOwners.fill({});
         g_injectedHeldMasks.fill(0);
         g_movementHeldMasks.fill(0);
     }

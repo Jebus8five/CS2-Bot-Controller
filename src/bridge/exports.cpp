@@ -52,6 +52,12 @@ extern "C" BC_EXPORT int64_t BotController_StartUsercmdMovement(int slot, float 
     return cs2bc::input_injector::StartUsercmdMovement(slot, forwardMove, leftMove);
 }
 
+// Diagnostic-only export; intentionally outside the production capability API.
+extern "C" BC_EXPORT int64_t BotController_StartUsercmdMovementGate2COnly(int slot, float forwardMove, float leftMove, int maxDurationMs)
+{
+    return cs2bc::input_injector::StartUsercmdMovementGate2COnly(slot, forwardMove, leftMove, maxDurationMs);
+}
+
 // Update one persistent analog movement override
 extern "C" BC_EXPORT int BotController_UpdateUsercmdMovement(int slot, int64_t movementId, float forwardMove, float leftMove)
 {
