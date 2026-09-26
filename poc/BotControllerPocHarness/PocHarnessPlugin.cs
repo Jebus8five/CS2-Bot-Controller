@@ -580,6 +580,28 @@ public sealed class PocHarnessPlugin : BasePlugin
     [CommandHelper(minArgs: 3, usage: "<slot> <durationMs> <writeScale> [lockMode: all|aim, default all] [gate2cOnly: true|false, default false] [forwardMove, default 1.0] [leftMove, default 0.0] [reverseAtMs, default disabled] [waitForRestMs, default disabled]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnGate2C(CCSPlayerController? caller, CommandInfo cmd)
     {
+        // Admission guard, harness-side only: css_poc_gate2c's own state
+        // (_gate2cWaitingForRest/_gate2cActive/_gate2cPostCancelActive) is a
+        // single, non-per-slot set of fields -- always has been, even before
+        // the rest-wait phase existed. A second invocation while any of these
+        // is still true would silently overwrite _gate2cSlot/_gate2cPawn/etc
+        // out from under the still-running session: its OnTick sampling would
+        // start reading the WRONG pawn, its deadline/reversal checks would
+        // fire against the new session's timing, and the original session's
+        // Lock/movement could be left ownerless. This does not touch native
+        // Gate2C-only ownership/exclusivity at all (that is already correct
+        // and unaffected) -- it only stops the HARNESS's own shared bookkeeping
+        // from being clobbered. Global rather than per-slot, matching the
+        // existing single-session-at-a-time architecture of this command
+        // (not a new limitation -- see the diagnostic below for the busy slot).
+        if (_gate2cWaitingForRest || _gate2cActive || _gate2cPostCancelActive)
+        {
+            int busySlot = _gate2cWaitingForRest ? _gate2cWaitSlot : _gate2cSlot;
+            Log($"[gate2c] REJECTED: another Gate2C session (or a pending rest-wait) is already active on slot " +
+                $"{busySlot} -- call css_poc_stop {busySlot} first, or wait for it to finish, before starting a new one.");
+            return;
+        }
+
         if (!int.TryParse(cmd.GetArg(1), out var slot) || !int.TryParse(cmd.GetArg(2), out var durationMs))
         { Log("[gate2c] bad slot/durationMs args"); return; }
         if (!float.TryParse(cmd.GetArg(3), System.Globalization.NumberStyles.Float,
