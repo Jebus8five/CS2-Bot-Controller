@@ -166,6 +166,28 @@ int64_t MonotonicMilliseconds()
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// Moved earlier (was declared after StartUsercmdMovement/
+// StartUsercmdMovementGate2COnly) so both Start functions can reap an
+// expired-but-unreaped Gate2C-only owner before their own exclusivity
+// checks -- otherwise a slot whose hooks stop firing (e.g. a killed/kicked
+// bot) would leave g_gate2cOnlyOwners stuck past its own deadline and
+// permanently reject new sessions on that slot, defeating the point of a
+// bounded expiry. GetUsercmdWork/PeekUsercmdMovement/ApplyUsercmdMovement's
+// own calls to this are unchanged.
+void ExpireGate2COnlyLocked(int slot)
+{
+    auto& owner = g_gate2cOnlyOwners[slot];
+    if (!owner.movementId) return;
+    auto& movements = g_usercmdMovements[slot];
+    auto it = std::find_if(movements.begin(), movements.end(),
+                           [&](const UsercmdMovement& m) { return m.id == owner.movementId; });
+    if (it == movements.end() || (it->expiresAtMs && MonotonicMilliseconds() >= it->expiresAtMs))
+    {
+        if (it != movements.end()) movements.erase(it);
+        owner = {};
+    }
+}
+
 // Creates an independently cancellable usercmd button injection
 } // namespace
 
@@ -190,7 +212,9 @@ int64_t StartUsercmdMovement(int slot, float forwardMove, float leftMove)
 
     int64_t id = g_nextUsercmdMovementId.fetch_add(1, std::memory_order_relaxed);
     std::scoped_lock lock(g_usercmdInjectionMutex);
-    if (motion_recorder::IsReplaying(slot) || g_gate2cOnlyOwners[slot].movementId) return -1;
+    if (motion_recorder::IsReplaying(slot)) return -1;
+    ExpireGate2COnlyLocked(slot); // reap a stale owner before checking exclusivity below
+    if (g_gate2cOnlyOwners[slot].movementId) return -1;
     g_usercmdMovements[slot].push_back(
         { .id = id, .forwardMove = std::clamp(forwardMove, -1.0F, 1.0F), .leftMove = std::clamp(leftMove, -1.0F, 1.0F) });
     return id;
@@ -203,30 +227,15 @@ int64_t StartUsercmdMovementGate2COnly(int slot, float forwardMove, float leftMo
     if (!ValidSlotIndex(slot) || !std::isfinite(forwardMove) || !std::isfinite(leftMove) ||
         maxDurationMs < 1000 || maxDurationMs > 60000 || !g_subtickActive || motion_recorder::IsReplaying(slot)) return -1;
     std::scoped_lock lock(g_usercmdInjectionMutex);
-    if (motion_recorder::IsReplaying(slot) || !g_usercmdMovements[slot].empty() ||
-        g_gate2cOnlyOwners[slot].movementId) return -1;
+    if (motion_recorder::IsReplaying(slot)) return -1;
+    ExpireGate2COnlyLocked(slot); // same reap, so a slot whose hooks stopped firing self-heals here too
+    if (!g_usercmdMovements[slot].empty() || g_gate2cOnlyOwners[slot].movementId) return -1;
     const int64_t id = g_nextUsercmdMovementId.fetch_add(1, std::memory_order_relaxed);
     g_usercmdMovements[slot].push_back({ id, std::clamp(forwardMove, -1.0F, 1.0F),
                                        std::clamp(leftMove, -1.0F, 1.0F), MonotonicMilliseconds() + maxDurationMs });
     g_gate2cOnlyOwners[slot] = { id };
     return id;
 }
-
-namespace {
-void ExpireGate2COnlyLocked(int slot)
-{
-    auto& owner = g_gate2cOnlyOwners[slot];
-    if (!owner.movementId) return;
-    auto& movements = g_usercmdMovements[slot];
-    auto it = std::find_if(movements.begin(), movements.end(),
-                           [&](const UsercmdMovement& m) { return m.id == owner.movementId; });
-    if (it == movements.end() || (it->expiresAtMs && MonotonicMilliseconds() >= it->expiresAtMs))
-    {
-        if (it != movements.end()) movements.erase(it);
-        owner = {};
-    }
-}
-} // namespace
 
 // Updates one persistent analog movement override
 bool UpdateUsercmdMovement(int slot, int64_t movementId, float forwardMove, float leftMove)
@@ -344,10 +353,14 @@ struct UsercmdWork
     bool injection;
     bool suppression;
     bool movement;
-    bool suppressApply;
 };
 
 // Takes one consistent snapshot instead of locking once per input kind.
+// Deliberately does NOT report Gate2C-only ownership: that decision is made
+// exactly once, inside ApplyUsercmdMovement, under the same lock used to
+// fetch the entry it applies to -- not here, against a snapshot that could
+// be stale by the time the caller acts on it (see ApplyUsercmdMovement's own
+// comment).
 UsercmdWork GetUsercmdWork(int slot)
 {
     if (!ValidSlotIndex(slot)) return {};
@@ -355,7 +368,7 @@ UsercmdWork GetUsercmdWork(int slot)
     std::scoped_lock lock(g_usercmdInjectionMutex);
     ExpireGate2COnlyLocked(slot);
     return { !g_usercmdInjections[slot].empty(), !g_usercmdSuppressions[slot].empty(),
-             !g_usercmdMovements[slot].empty(), g_gate2cOnlyOwners[slot].movementId != 0 };
+             !g_usercmdMovements[slot].empty() };
 }
 
 // Gate 2C: read-only peek at the SAME authoritative movement intent
@@ -383,6 +396,9 @@ bool ApplyUsercmdMovement(int slot, PlayerCommand* pc, CBaseUserCmdPB* base) // 
 
     std::scoped_lock lock(g_usercmdInjectionMutex);
     ExpireGate2COnlyLocked(slot);
+    // Sole suppression decision point (HookedPlayerRunCommand's call site
+    // does not gate on a separate snapshot) -- made here, under this same
+    // lock, so it can never act on a stale read from before this call.
     if (g_gate2cOnlyOwners[slot].movementId) return false;
     const auto& movements = g_usercmdMovements[slot];
     if (movements.empty()) return false;
@@ -885,7 +901,7 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
     auto* boundary = FindPhysicsFrame(slot);
     bool recording = boundary && boundary->recording && motion_recorder::IsRecording(slot);
     bool replaying = boundary && boundary->replaying && motion_recorder::IsReplaying(slot);
-    const auto [hasUsercmdInjection, hasUsercmdSuppression, hasUsercmdMovement, suppressApply] = replaying ? UsercmdWork{} : GetUsercmdWork(slot);
+    const auto [hasUsercmdInjection, hasUsercmdSuppression, hasUsercmdMovement] = replaying ? UsercmdWork{} : GetUsercmdWork(slot);
 
     if (cmd == nullptr)
     {
@@ -921,7 +937,7 @@ KHook::Return<void> HookedPlayerRunCommand(void* services, void* cmd) noexcept
 
         if (hasUsercmdSuppression && !replaying) ApplyUsercmdSuppressions(slot, pc, base);
         if (hasUsercmdInjection && !replaying) ApplyUsercmdInjections(slot, pc, base);
-        if (hasUsercmdMovement && !replaying && !suppressApply) ApplyUsercmdMovement(slot, pc, base);
+        if (hasUsercmdMovement && !replaying) ApplyUsercmdMovement(slot, pc, base);
     }
 
     // Gate 2B diagnostic "after" snapshot: still read-only. If the production

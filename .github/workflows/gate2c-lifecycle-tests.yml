@@ -1,15 +1,20 @@
 name: Gate2C Lifecycle Tests
 
-# Manual only. This workflow builds and runs ONLY the standalone Gate2C
-# positional-pairing unit tests (tests/gate2c/gate2c_lifecycle_test.cpp,
-# via tests/gate2c/CMakeLists.txt) -- a self-contained CMake project with
-# zero CS2/HL2SDK/metamod-source/KHook/protobuf dependency (see that
-# test file's own top-of-file comment). It never touches, builds, or
-# packages the main BotController plugin (the top-level CMakeLists.txt
-# is never invoked here), never installs or launches CS2, and never
-# deploys anything to a server -- its only output is a pass/fail test
-# result plus the raw ctest log, both visible only in this run's own
-# Actions UI.
+# Manual only. This workflow builds and runs two independent, standalone
+# CMake projects, neither of which touches, builds, or packages the main
+# BotController plugin (the top-level CMakeLists.txt is never invoked
+# here), never installs or launches CS2, and never deploys anything to a
+# server -- output is only pass/fail test results plus the raw ctest logs,
+# visible in this run's own Actions UI.
+#   1. tests/gate2c/gate2c_lifecycle_test.cpp (via tests/gate2c/CMakeLists.txt)
+#      -- the Gate2C positional-pairing state machine (Gate2CDiagnostics.cpp),
+#      zero CS2/HL2SDK/metamod-source/KHook/protobuf dependency.
+#   2. tests/usercmd_gate2c_only/usercmd_gate2c_only_test.cpp (via
+#      tests/usercmd_gate2c_only/CMakeLists.txt) -- a hand-verified mirror
+#      model of InputInjector.cpp's Gate2C-only movement-sink isolation
+#      logic (exclusivity, ownership, expiry, cancellation); see that test
+#      file's own top-of-file comment for exactly what it does and does not
+#      prove about the real translation unit.
 on:
   workflow_dispatch: {}
 
@@ -31,3 +36,18 @@ jobs:
 
       - name: Run standalone Gate2C lifecycle tests
         run: ctest --test-dir build/gate2c-tests -C Release --output-on-failure
+
+  usercmd-gate2c-only-tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure (tests/usercmd_gate2c_only only -- independent of the main plugin build)
+        run: cmake -S tests/usercmd_gate2c_only -B build/usercmd-gate2c-only-tests -A x64
+
+      - name: Build
+        run: cmake --build build/usercmd-gate2c-only-tests --config Release
+
+      - name: Run standalone Gate2C-only movement-sink model tests
+        run: ctest --test-dir build/usercmd-gate2c-only-tests -C Release --output-on-failure
