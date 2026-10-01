@@ -963,7 +963,7 @@ bool PrepareReplayDropPawn(int slot, void* services)
         const uint32_t mask = tg::kFlOnGround | tg::kFlDucking;
         WriteField(pawn, tg::g_entFlags, (flags & ~mask) | (pre.entityFlags & mask));
     }
-    bot_controller_hooks::ApplyReplayEyeAngles(pawn, pre.pitch, pre.yaw);
+    bot_controller_hooks::ApplyEyeAngles(pawn, pre.pitch, pre.yaw);
     if (!IsReplaying(slot)) return false;
     pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return false;
@@ -1008,7 +1008,7 @@ void OnReplayCommandPre(int slot, void* services, const ReplayTick& tick)
     WriteField(pawn, tg::g_entMoveType, tick.pre.moveType);
     WriteField(pawn, tg::g_entActualMoveType, tick.pre.actualMoveType);
     WriteSceneNodeOrigin(pawn, tick.pre);
-    bot_controller_hooks::ApplyReplayEyeAngles(pawn, tick.pre.pitch, tick.pre.yaw);
+    bot_controller_hooks::ApplyEyeAngles(pawn, tick.pre.pitch, tick.pre.yaw);
     pawn = input_injector::ResolveReplayPawn(slot, services);
     if (!pawn) return;
     WriteRawViewAnglesToPawn(pawn, tick.pre.pitch, tick.pre.yaw);
@@ -1062,7 +1062,7 @@ void OnReplayCommit(int slot, void* services, bool simulated)
             live = (live & ~mask) | (t.post.entityFlags & mask);
             WriteField(pawn, tg::g_entFlags, live);
         }
-        bot_controller_hooks::ApplyReplayEyeAngles(pawn, t.post.pitch, t.post.yaw);
+        bot_controller_hooks::ApplyEyeAngles(pawn, t.post.pitch, t.post.yaw);
     }
 
     // SetEyeAngles calls the engine; reacquire ownership after that boundary.

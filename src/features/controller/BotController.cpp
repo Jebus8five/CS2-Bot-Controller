@@ -104,8 +104,10 @@ void* ReplayControllerForPawn(void* pawn)
 }
 #endif
 
-// Updates replay angles without queuing a server correction over the next UserCmd.
-bool ApplyReplayEyeAnglesInternal(void* pawn, float pitch, float yaw)
+// Writes a pawn's eye angles via the engine's own SetEyeAngles, without
+// queuing a server correction over the next UserCmd. Generic: has no
+// dependency on replay/MotionRecorder state -- it only needs a live pawn.
+bool ApplyEyeAnglesInternal(void* pawn, float pitch, float yaw)
 {
     if (!pawn || !g_hookSetEyeAngles.Active()) return false;
 
@@ -289,8 +291,8 @@ void* UpdateAddress() { return g_addrUpdate; }
 void* UpkeepAddress() { return g_addrUpkeep; }
 void* UpdateLookAnglesAddress() { return g_addrUpdateLookAngles; }
 
-// Publishes a replay angle without depending on the bot upkeep path.
-bool ApplyReplayEyeAngles(void* pawn, float pitch, float yaw) { return ApplyReplayEyeAnglesInternal(pawn, pitch, yaw); }
+// Publishes an eye angle without depending on the bot upkeep path.
+bool ApplyEyeAngles(void* pawn, float pitch, float yaw) { return ApplyEyeAnglesInternal(pawn, pitch, yaw); }
 
 // Last CCSBot* seen in Update for this slot
 void* BotForSlot(int slot)
@@ -298,6 +300,20 @@ void* BotForSlot(int slot)
     if (slot < 0 || slot >= 64) return nullptr;
     std::scoped_lock lk(g_slotToBotMu);
     return g_slotToBot[slot];
+}
+
+// Resolves a live bot's pawn for this slot and writes its eye angles.
+// Reuses ResolveSlot's own staleness/identity checks (the same ones
+// CCSBotToSlot relies on) rather than re-deriving pawn resolution here --
+// res.slot != slot catches a stale BotForSlot pointer the same way
+// BotProfile::ReadProfile's CCSBotToSlot(bot) != slot check does.
+bool SetEyeAnglesForSlot(int slot, float pitch, float yaw)
+{
+    void* bot = BotForSlot(slot);
+    if (!bot) return false;
+    SlotResolution res = ResolveSlot(bot);
+    if (res.slot != slot || !res.pawn) return false;
+    return ApplyEyeAngles(res.pawn, pitch, yaw);
 }
 } // namespace bot_controller_hooks
 } // namespace cs2bc

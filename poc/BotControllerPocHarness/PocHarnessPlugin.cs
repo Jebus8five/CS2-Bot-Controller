@@ -1,11 +1,20 @@
 // BotController control-chain PoC harness -- DISPOSABLE, EXPERIMENTAL, NOT PRODUCTION.
 //
 // Scope, deliberately narrow per this task's authorization:
-//   - Uses BotController's existing public control surface (IBotControllerApi) --
-//     no new native hooks, no changes to BotController's own implementation. (An
-//     earlier version of this harness also P/Invoked four native "hook-call-counter"
-//     exports; those were found not to exist in this build and were removed -- see
-//     the comment above the remaining BotController_GetVersion DllImport.)
+//   - Mostly uses BotController's existing public control surface
+//     (IBotControllerApi) plus diagnostic-only native exports (Gate2B/Gate2C,
+//     this file's own DllImports). One exception, explicitly authorized: the
+//     css_poc_lockaim/css_poc_setaim commands below expose one new, minimal
+//     native capability -- BotController_SetEyeAngles -- added to
+//     BotController's own source (BotController.h/.cpp, exports.cpp) this
+//     session. It installs no new hook; it exposes an existing, already-
+//     installed engine-call primitive (previously replay-only, now generic
+//     and reusable) under a new export. No Gate3/replay/synthetic-subtick
+//     behavior was added, enabled, or changed -- see that export's own
+//     comment in exports.cpp. (An earlier version of this harness also
+//     P/Invoked four native "hook-call-counter" exports; those were found
+//     not to exist in this build and were removed -- see the comment above
+//     the remaining BotController_GetVersion DllImport.)
 //   - Every read-back is independent: direct schema reads of the pawn's own
 //     AbsOrigin/EyeAngles, using the exact same live-proven technique as
 //     Cs2AiTrainingScenarioActorController/PawnOrientationSchema in the production
@@ -52,6 +61,30 @@
 //                                                junctions/symlinks -- fails closed); refuses while
 //                                                any Gate2/Gate2C/Gate3 phase is active. Verifies
 //                                                3 ticks later against a freshly re-resolved pawn.
+//   css_poc_lockaim <slot>                   -- Lock(Aim) only for slot: suppresses the bot's own
+//                                                Upkeep/UpdateLookAngles (its own aim decisions),
+//                                                leaves Update (movement) completely untouched --
+//                                                does NOT inject movement, unlike css_poc_gate2's
+//                                                lockMode=aim. Unlock via css_poc_stop.
+//                                                Isolated-server-only (same gate as css_poc_teleport).
+//   css_poc_setaim <slot> <pitch> <yaw>      -- writes a live bot's eye angles via BotController's
+//                                                native BotController_SetEyeAngles export (the same
+//                                                generic engine-call primitive replay uses
+//                                                internally, independent of Gate3/replay/synthetic-
+//                                                subtick state). Does not lock anything itself --
+//                                                call css_poc_lockaim first to suppress the bot's own
+//                                                aim, or leave it unlocked to observe the two race.
+//                                                pitch is bounded to [-89,89] (the universal Source-
+//                                                engine look-up/down range, not a map-specific guess);
+//                                                yaw is unconstrained (the native side wraps it).
+//                                                Isolated-server-only; refused while a css_poc_teleport
+//                                                verification is pending (same confound as Gate2/
+//                                                Gate2C) but NOT while Gate2/Gate2C movement is active
+//                                                -- aim and movement are independently controllable by
+//                                                design. Samples EyeAngles for several ticks after the
+//                                                write to show the angle holds, not just that it landed
+//                                                once; a new css_poc_setaim call is refused while a
+//                                                previous one's sampling window is still open.
 //   css_poc_stop <slot>                     -- cancel all injections/locks/replay for slot, unlock
 
 using System.Globalization;
@@ -127,6 +160,15 @@ public sealed class PocHarnessPlugin : BasePlugin
     [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
     private static extern long BotController_StartUsercmdMovementGate2COnly(int slot, float forwardMove, float leftMove, int maxDurationMs);
 
+    // ---- Live aim-control export (native, generic -- not diagnostic-only
+    // like the Gate2B/Gate2C exports above). Writes one bot's eye angles via
+    // BotController::ApplyEyeAngles, the same primitive replay uses
+    // internally; independent of Lock state and of Gate3/replay/synthetic-
+    // subtick. Returns 0 on success, -1 on any failure (invalid slot, no
+    // live bot for that slot, stale/missing pawn) -- see exports.cpp.
+    [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int BotController_SetEyeAngles(int slot, float pitch, float yaw);
+
     public override void Load(bool hotReload)
     {
         _logPath = Path.Combine(ModuleDirectory, "poc-harness.log");
@@ -160,6 +202,7 @@ public sealed class PocHarnessPlugin : BasePlugin
     public override void Unload(bool hotReload)
     {
         ClearTeleportVerification($"plugin unload (hotReload={hotReload})");
+        ClearAimVerification($"plugin unload (hotReload={hotReload})");
         base.Unload(hotReload);
     }
 
@@ -490,6 +533,217 @@ public sealed class PocHarnessPlugin : BasePlugin
         observed is null ? "n/a"
             : $"(pitch={TeleportSafety.WrapAngleDelta(observed.X, req.Pitch):F4},yaw={TeleportSafety.WrapAngleDelta(observed.Y, req.Yaw):F4},roll={TeleportSafety.WrapAngleDelta(observed.Z, req.Roll):F4})";
 
+    // ---- AIM: Lock(Aim) only -- suppresses the bot's own aim decisions
+    // (Upkeep/UpdateLookAngles) without touching movement (Update) at all
+    // and without injecting any movement itself, unlike css_poc_gate2's
+    // lockMode=aim (which always also calls StartUsercmdMovement). Unlocked
+    // via the existing css_poc_stop, which already calls Unlock(..., Aim)
+    // unconditionally -- no new cleanup path needed.
+    [ConsoleCommand("css_poc_lockaim", "AIM: Lock(Aim) only for a slot -- suppress the bot's own aim, leave movement untouched (diagnostic-only, isolated-server-only)")]
+    [CommandHelper(minArgs: 1, usage: "<slot>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnLockAim(CCSPlayerController? caller, CommandInfo cmd)
+    {
+        if (!_isolatedEnvironmentConfirmed)
+        {
+            Log($"[lockaim] REFUSED: isolated-server environment not confirmed (ModuleDirectory={ModuleDirectory}) -- failing closed.");
+            return;
+        }
+        if (!int.TryParse(cmd.GetArg(1), out var slot)) { Log("[lockaim] bad slot arg"); return; }
+
+        var (_, pawn, why) = ResolveLiveBotPawn(slot);
+        if (pawn is null) { Log($"[lockaim] REFUSED: slot {slot} {why}"); return; }
+
+        var api = BotControllerCap.Get();
+        if (api is null) { Log("[lockaim] FAIL: capability not available (run gate1 first)"); return; }
+
+        bool locked;
+        try { locked = api.Lock(slot, LockKind.Aim); }
+        catch (Exception ex) { Log($"[lockaim] Lock threw {ex.GetType().Name}: {ex.Message}"); return; }
+        Log($"[lockaim] Lock(Aim) accepted={locked} for slot {slot} -- suppresses only the bot's own Upkeep/UpdateLookAngles " +
+            "(its own aim decisions); Update (movement) is completely untouched, so css_poc_gate2/gate2c remain independently " +
+            $"usable on this slot while aim is locked. Unlock via css_poc_stop {slot}.");
+    }
+
+    // ---- AIM: css_poc_setaim -- writes a live bot's eye angles via
+    // BotController_SetEyeAngles, the native export wrapping the SAME
+    // generic engine-call primitive (BotController::ApplyEyeAngles) that
+    // replay uses internally. Does not depend on Gate3/replay/synthetic-
+    // subtick state, and does not itself lock anything -- css_poc_lockaim
+    // is a separate, orthogonal step. Does not block on Gate2/Gate2C
+    // movement being active (aim and movement are independently
+    // controllable by design); it DOES block on a pending css_poc_teleport
+    // verification, since that reads EyeAngles too and would be confounded
+    // the same way Gate2/Gate2C already guard against. ----
+    [ConsoleCommand("css_poc_setaim", "AIM: write a live bot's eye angles via BotController's native SetEyeAngles export (diagnostic-only, isolated-server-only)")]
+    [CommandHelper(minArgs: 3, usage: "<slot> <pitch> <yaw>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnSetAim(CCSPlayerController? caller, CommandInfo cmd)
+    {
+        if (!_isolatedEnvironmentConfirmed)
+        {
+            Log($"[setaim] REFUSED: isolated-server environment not confirmed (ModuleDirectory={ModuleDirectory}) -- failing closed.");
+            return;
+        }
+
+        // Shared concern with Gate2/Gate2C: a pending css_poc_teleport
+        // verification reads EyeAngles a few ticks after the teleport, so
+        // writing a new angle inside that window would confound both
+        // results. Deliberately does NOT check Gate2/Gate2C/Gate3 state --
+        // aim must remain controllable while movement is active (criterion
+        // F of this capability's acceptance tests).
+        ReapExpiredTeleportVerification();
+        if (_teleportVerifyPending)
+        {
+            Log($"[setaim] REJECTED: a css_poc_teleport verification is still pending on slot {_teleportVerifySlot} -- " +
+                $"retry in a moment (or css_poc_stop {_teleportVerifySlot}).");
+            return;
+        }
+
+        if (_aimActive)
+        {
+            Log($"[setaim] REJECTED: a previous css_poc_setaim sampling window is still open on slot {_aimSlot} -- " +
+                $"wait for it to finish, or css_poc_stop {_aimSlot}.");
+            return;
+        }
+
+        var rawArgs = new string?[3];
+        for (int i = 0; i < rawArgs.Length; i++) rawArgs[i] = i + 1 < cmd.ArgCount ? cmd.GetArg(i + 1) : null;
+        if (!AimSafety.TryParseSetAimArgs(rawArgs, out var req, out var parseError))
+        { Log($"[setaim] {parseError}"); return; }
+
+        var (_, pawn, why) = ResolveLiveBotPawn(req.Slot);
+        if (pawn is null) { Log($"[setaim] REFUSED: slot {req.Slot} {why}"); return; }
+
+        uint pawnHandleRaw;
+        try { pawnHandleRaw = pawn.EntityHandle.Raw; }
+        catch (Exception ex) { Log($"[setaim] REFUSED: could not read pawn entity handle ({ex.GetType().Name}: {ex.Message})"); return; }
+
+        var (okPre, _, eyePre, detailPre) = ReadPawnState(pawn);
+        Log(okPre
+            ? $"[setaim] PRE slot={req.Slot} observedEye={FormatEye(eyePre)}"
+            : $"[setaim] PRE read FAILED: {detailPre} -- proceeding anyway, the write does not depend on a successful pre-read");
+
+        Log($"[setaim] commanding slot={req.Slot} pitch={req.Pitch:F4} yaw={req.Yaw:F4} via BotController_SetEyeAngles");
+
+        int writeStatus;
+        try { writeStatus = BotController_SetEyeAngles(req.Slot, req.Pitch, req.Yaw); }
+        catch (Exception ex)
+        {
+            Log($"[setaim] BotController_SetEyeAngles threw {ex.GetType().Name}: {ex.Message} -- treat as FAIL, no sampling window started.");
+            return;
+        }
+        Log($"[setaim] engine write result status={writeStatus} (0=success, -1=failed closed -- invalid slot, no live bot, or stale/missing pawn; " +
+            "this is the ENGINE CALL's own result, not independently-observed EyeAngles -- see the sampled trace below for that).");
+        if (writeStatus != 0) { Log("[setaim] write FAILED -- no sampling window started."); return; }
+
+        _aimSamples.Clear();
+        _aimSlot = req.Slot;
+        _aimPawnHandleRaw = pawnHandleRaw;
+        _aimRequested = req;
+        _aimTicksRemaining = AimVerifyTicks;
+        _aimActive = true;
+        Log($"[setaim] sampling independently-observed EyeAngles for {AimVerifyTicks} ticks to confirm the angle holds (not just that it landed once). " +
+            $"Call css_poc_stop {req.Slot} early if needed.");
+    }
+
+    private const int AimVerifyTicks = 12;
+    private const float AimAngleToleranceDeg = 1.0f;
+
+    private bool _aimActive;
+    private int _aimSlot;
+    private uint _aimPawnHandleRaw;
+    private AimRequest _aimRequested;
+    private int _aimTicksRemaining;
+    private readonly List<(long tMs, float pitch, float yaw)> _aimSamples = new();
+
+    private static string FormatEye(QAngle? eye) =>
+        eye is null ? "unreadable" : $"(pitch={eye.X:F4},yaw={eye.Y:F4})";
+
+    // Called from OnTick while _aimActive. Never throws: any failure clears
+    // the window and logs it rather than leaving it stuck open. Mirrors
+    // TickTeleportVerification's re-resolve-and-validate shape exactly.
+    private void TickAimVerification()
+    {
+        if (!_aimActive) return;
+
+        try
+        {
+            var (_, pawn, why) = ResolveLiveBotPawn(_aimSlot);
+            if (pawn is null) { FinishAim(aborted: true, $"pawn no longer resolvable ({why})"); return; }
+            if (pawn.EntityHandle.Raw != _aimPawnHandleRaw)
+            { FinishAim(aborted: true, "pawn entity changed mid-window (not attributing samples to this command)"); return; }
+
+            var (ok, _, eye, _) = ReadPawnState(pawn);
+            if (ok) _aimSamples.Add((MonotonicMs(), eye!.X, eye.Y));
+        }
+        catch (Exception ex) { FinishAim(aborted: true, $"sampling threw {ex.GetType().Name}: {ex.Message}"); return; }
+
+        if (--_aimTicksRemaining <= 0) FinishAim(aborted: false, null);
+    }
+
+    // Logs the full sampled trace and a stability verdict, then clears the
+    // window. aborted=true (pawn gone/changed mid-window) is logged as such
+    // rather than silently producing a possibly-misleading verdict.
+    private void FinishAim(bool aborted, string? abortReason)
+    {
+        _aimActive = false;
+        var req = _aimRequested;
+        var slot = _aimSlot;
+
+        Log($"[setaim] sample count={_aimSamples.Count} requested=(pitch={req.Pitch:F4},yaw={req.Yaw:F4})" +
+            (aborted ? $" -- ABORTED: {abortReason} (verdict below is based on whatever samples were collected before this)" : ""));
+        foreach (var s in _aimSamples)
+            Log($"[setaim] t={s.tMs} observedEye=(pitch={s.pitch:F4},yaw={s.yaw:F4}) " +
+                $"delta=(pitch={TeleportSafety.WrapAngleDelta(s.pitch, req.Pitch):F4},yaw={TeleportSafety.WrapAngleDelta(s.yaw, req.Yaw):F4})");
+
+        if (_aimSamples.Count == 0)
+        {
+            Log("[setaim] no samples collected -- cannot verify stability (treat as FAIL, not as a passive non-result).");
+            return;
+        }
+
+        // Stability: the LAST sample must be within tolerance (reached the
+        // target by the end of the window), AND every sample from the first
+        // in-tolerance one onward must also stay in tolerance -- a target
+        // that is reached and then drifts back off is not "stable", even if
+        // the very last sample happens to be close again.
+        var last = _aimSamples[^1];
+        var lastPitchOk = MathF.Abs(TeleportSafety.WrapAngleDelta(last.pitch, req.Pitch)) <= AimAngleToleranceDeg;
+        var lastYawOk = MathF.Abs(TeleportSafety.WrapAngleDelta(last.yaw, req.Yaw)) <= AimAngleToleranceDeg;
+
+        int firstInToleranceIndex = -1;
+        for (int i = 0; i < _aimSamples.Count; i++)
+        {
+            var pOk = MathF.Abs(TeleportSafety.WrapAngleDelta(_aimSamples[i].pitch, req.Pitch)) <= AimAngleToleranceDeg;
+            var yOk = MathF.Abs(TeleportSafety.WrapAngleDelta(_aimSamples[i].yaw, req.Yaw)) <= AimAngleToleranceDeg;
+            if (pOk && yOk) { firstInToleranceIndex = i; break; }
+        }
+
+        bool heldOnceReached = firstInToleranceIndex >= 0;
+        if (heldOnceReached)
+        {
+            for (int i = firstInToleranceIndex; i < _aimSamples.Count; i++)
+            {
+                var pOk = MathF.Abs(TeleportSafety.WrapAngleDelta(_aimSamples[i].pitch, req.Pitch)) <= AimAngleToleranceDeg;
+                var yOk = MathF.Abs(TeleportSafety.WrapAngleDelta(_aimSamples[i].yaw, req.Yaw)) <= AimAngleToleranceDeg;
+                if (!pOk || !yOk) { heldOnceReached = false; break; }
+            }
+        }
+
+        string verdict = !lastPitchOk || !lastYawOk
+            ? "FAIL (final sample not within tolerance of requested angle)"
+            : !heldOnceReached
+                ? "FAIL (reached tolerance at some point but drifted back out before the window ended -- not stable)"
+                : "PASS (reached the requested angle and held it, within " + AimAngleToleranceDeg + " deg, for the rest of the sampling window)";
+        Log($"[setaim] slot={slot} STABILITY VERDICT: {verdict}");
+    }
+
+    private void ClearAimVerification(string reason)
+    {
+        if (!_aimActive) return;
+        _aimActive = false;
+        Log($"[setaim] sampling window for slot {_aimSlot} cleared without finishing: {reason}");
+    }
+
     // ---- GATE 2: movement ----
     private readonly Dictionary<int, long> _activeMovement = new();
 
@@ -628,6 +882,8 @@ public sealed class PocHarnessPlugin : BasePlugin
         // pending delayed verification is dropped rather than carried over.
         RegisterListener<Listeners.OnMapStart>(_ => ClearTeleportVerification("map start"));
         RegisterListener<Listeners.OnMapEnd>(() => ClearTeleportVerification("map end"));
+        RegisterListener<Listeners.OnMapStart>(_ => ClearAimVerification("map start"));
+        RegisterListener<Listeners.OnMapEnd>(() => ClearAimVerification("map end"));
 
         // Gate2C-only precision-control extension: round-transition detection.
         // Purely a counter -- this never blocks, cancels, or alters a running
@@ -652,6 +908,7 @@ public sealed class PocHarnessPlugin : BasePlugin
     private void OnTick()
     {
         TickTeleportVerification();
+        TickAimVerification();
         if (_gate2Active && _gate2Pawn is not null)
         {
             var (ok, origin, eye, _) = ReadPawnState(_gate2Pawn);
@@ -1486,6 +1743,10 @@ public sealed class PocHarnessPlugin : BasePlugin
         // Emergency stop always drops a pending teleport verification, whatever
         // its slot -- it holds no lock or native state, so dropping it is safe.
         ClearTeleportVerification($"css_poc_stop {slot}");
+        // Same reasoning for a pending css_poc_setaim sampling window: it holds
+        // no lock or native state of its own either (Lock(Aim) is a separate,
+        // independently-unlocked step below), so dropping it is safe.
+        ClearAimVerification($"css_poc_stop {slot}");
 
         var api = BotControllerCap.Get();
         bool wasGate2Active = _gate2Active || _gate2PostCancelActive;
@@ -1612,7 +1873,9 @@ public static class TeleportSafety
         return true;
     }
 
-    private static bool TryParseFinite(string? s, out float value) =>
+    // internal rather than private: AimSafety below reuses this exact check
+    // rather than duplicating it.
+    internal static bool TryParseFinite(string? s, out float value) =>
         float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out value) && float.IsFinite(value);
 
     // observed - requested, wrapped to [-180, 180).
@@ -1625,4 +1888,44 @@ public static class TeleportSafety
     }
 
     public static bool IsVerificationExpired(long nowMs, long expiresAtMs) => nowMs >= expiresAtMs;
+}
+
+// ---- css_poc_setaim's pure decision logic, kept free of any
+// CounterStrikeSharp type for the same reason as TeleportSafety above
+// (poc/BotControllerPocHarness.Tests). ----
+
+public readonly record struct AimRequest(int Slot, float Pitch, float Yaw);
+
+public static class AimSafety
+{
+    // The universal Source-engine look-up/down range -- a true engine
+    // constant, not a guessed map-specific value (unlike teleport's
+    // deliberately-unbounded x/y/z, which this harness has no basis to
+    // bound since it makes no claim about any specific map). Yaw is left
+    // unconstrained here: the native side already wraps it via NormalizeDeg
+    // before writing.
+    public const float MinPitchDeg = -89f;
+    public const float MaxPitchDeg = 89f;
+
+    // args: [slot, pitch, yaw].
+    public static bool TryParseSetAimArgs(IReadOnlyList<string?> args, out AimRequest request, out string error)
+    {
+        request = default;
+        string? Arg(int i) => i < args.Count ? args[i] : null;
+
+        if (!int.TryParse(Arg(0), NumberStyles.Integer, CultureInfo.InvariantCulture, out var slot) || slot < 0)
+        { error = "bad slot arg -- must be a non-negative integer"; return false; }
+
+        if (!TeleportSafety.TryParseFinite(Arg(1), out var pitch))
+        { error = "bad pitch arg -- must be a finite number"; return false; }
+        if (pitch < MinPitchDeg || pitch > MaxPitchDeg)
+        { error = $"bad pitch arg -- must be within [{MinPitchDeg},{MaxPitchDeg}] (the Source-engine look-up/down range)"; return false; }
+
+        if (!TeleportSafety.TryParseFinite(Arg(2), out var yaw))
+        { error = "bad yaw arg -- must be a finite number"; return false; }
+
+        request = new AimRequest(slot, pitch, yaw);
+        error = string.Empty;
+        return true;
+    }
 }

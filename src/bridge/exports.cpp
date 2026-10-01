@@ -1,6 +1,7 @@
 // C-ABI exports for CounterStrikeSharp P/Invoke.
 
 #include "dispatch.h"
+#include "BotController.h"
 #include "MotionRecorder.h"
 #include "InputInjector.h"
 #include "Gate2BDiagnostics.h"
@@ -39,6 +40,18 @@ extern "C" BC_EXPORT int BotController_IsLocked(int slot, int kind)
 
 // ABI 21 keeps the native command-based projectile replay path without birth alignment exports.
 extern "C" BC_EXPORT int BotController_GetVersion() { return 21; }
+
+// Live aim control: writes one live bot's eye angles via the same generic
+// engine-call primitive (BotController::ApplyEyeAngles) that replay uses
+// internally -- independent of Lock state and of Gate3/replay/synthetic-
+// subtick. Callers that want the bot's own aim suppressed first should
+// call BotController_Lock(slot, Aim, 0) separately; this export only
+// writes the angle. Fails closed (returns -1) on an invalid slot, no live
+// bot for that slot, or a stale/missing pawn -- never partially applies.
+extern "C" BC_EXPORT int BotController_SetEyeAngles(int slot, float pitch, float yaw)
+{
+    return cs2bc::bot_controller_hooks::SetEyeAnglesForSlot(slot, pitch, yaw) ? 0 : -1;
+}
 
 // Create an independently cancellable usercmd injection
 extern "C" BC_EXPORT int64_t BotController_InjectUsercmd(int slot, uint64_t buttonMask, int durationMs)
