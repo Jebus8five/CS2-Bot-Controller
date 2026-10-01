@@ -510,6 +510,19 @@ public sealed class PocHarnessPlugin : BasePlugin
     [CommandHelper(minArgs: 2, usage: "<slot> <durationMs> [lockMode: all|aim, default all]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
     public void OnGate2(CCSPlayerController? caller, CommandInfo cmd)
     {
+        // A css_poc_teleport's delayed verification reads the pawn a few ticks
+        // after the teleport; starting Gate2 (lock/movement) inside that window
+        // would confound both results, exactly as already guarded against in
+        // OnGate2C below. Expired pending state is reaped first so it can
+        // never block Gate2 indefinitely.
+        ReapExpiredTeleportVerification();
+        if (_teleportVerifyPending)
+        {
+            Log($"[gate2] REJECTED: a css_poc_teleport verification is still pending on slot {_teleportVerifySlot} -- " +
+                $"retry in a moment (or css_poc_stop {_teleportVerifySlot}).");
+            return;
+        }
+
         if (!int.TryParse(cmd.GetArg(1), out var slot) || !int.TryParse(cmd.GetArg(2), out var durationMs))
         { Log("[gate2] bad args"); return; }
 
