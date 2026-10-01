@@ -1080,14 +1080,22 @@ public sealed class PocHarnessPlugin : BasePlugin
         try
         {
             bool onGround = pawn.OnGroundLastTick;
+            var baseMs = pawn.MovementServices;
+            if (baseMs is null) return (false, false, -1, "no MovementServices");
+            // CounterStrikeSharp's schema wrappers are NativeObject-style:
             // pawn.MovementServices is statically typed as the base
-            // CPlayer_MovementServices; LastJumpTick lives on the CS-specific
-            // CCSPlayer_MovementServices subtype (confirmed via reflection:
-            // CCSPlayer_MovementServices.IsSubclassOf(CPlayer_MovementServices)
-            // == true), so it needs an explicit cast -- the first build of
-            // this command failed on exactly this (verified the wrong type).
-            var ms = pawn.MovementServices as CCSPlayer_MovementServices;
-            if (ms is null) return (false, false, -1, "no CCSPlayer_MovementServices");
+            // CPlayer_MovementServices, and a plain C# `as`/cast to the
+            // CS-specific CCSPlayer_MovementServices subtype compiles but
+            // returns null at runtime (the wrapper instance's CLR type is
+            // the base, not the derived class -- confirmed live, not
+            // assumed, after the first "as"-based build compiled clean but
+            // every jump/crouch read failed with "no CCSPlayer_
+            // MovementServices"). The correct conversion is the base
+            // class's own generic As<T>() (confirmed present via
+            // reflection), which rewraps the same underlying native
+            // pointer as the requested concrete type.
+            var ms = baseMs.As<CCSPlayer_MovementServices>();
+            if (ms is null) return (false, false, -1, "As<CCSPlayer_MovementServices>() returned null");
             return (true, onGround, ms.LastJumpTick, "ok");
         }
         catch (Exception ex) { return (false, false, -1, $"unreadable:{ex.GetType().Name}"); }
@@ -1314,10 +1322,12 @@ public sealed class PocHarnessPlugin : BasePlugin
     {
         try
         {
-            // Same cast as ReadJumpState above: Ducked/Ducking/DuckAmount live
-            // on CCSPlayer_MovementServices, not the base CPlayer_MovementServices.
-            var ms = pawn.MovementServices as CCSPlayer_MovementServices;
-            if (ms is null) return (false, false, false, 0f, "no CCSPlayer_MovementServices");
+            // Same As<T>() conversion as ReadJumpState above (see its comment
+            // for why a plain "as" cast compiles but returns null at runtime).
+            var baseMs = pawn.MovementServices;
+            if (baseMs is null) return (false, false, false, 0f, "no MovementServices");
+            var ms = baseMs.As<CCSPlayer_MovementServices>();
+            if (ms is null) return (false, false, false, 0f, "As<CCSPlayer_MovementServices>() returned null");
             return (true, ms.Ducked, ms.Ducking, ms.DuckAmount, "ok");
         }
         catch (Exception ex) { return (false, false, false, 0f, $"unreadable:{ex.GetType().Name}"); }
