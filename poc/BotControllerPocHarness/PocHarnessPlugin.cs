@@ -85,6 +85,24 @@
 //                                                write to show the angle holds, not just that it landed
 //                                                once; a new css_poc_setaim call is refused while a
 //                                                previous one's sampling window is still open.
+//   css_poc_weaponstate <slot>               -- log current weapon identity + clip1 ammo, independent
+//                                                read-only, no mutation.
+//   css_poc_firetest <slot> [pressCount=3] [pressDurationMs=50] [gapMs=200]
+//                     [lockMode=none|aim|all, default none] [weaponDefIndex=4 Glock-18]
+//                                             -- injects pressCount discrete primary-attack presses via
+//                                                the existing public IBotControllerApi.InjectUsercmd
+//                                                (no new native code) and verifies via independently-
+//                                                read clip1 ammo, never via InjectUsercmd's own return
+//                                                value. Forces a known weapon first (SwitchBotWeapon)
+//                                                for a deterministic test. lockMode defaults to none --
+//                                                deliberately the LEAST invasive tier, not assumed to
+//                                                need Lock(All) the way movement did; aim/all are
+//                                                available to escalate if runtime evidence shows none
+//                                                is insufficient. Also runs an idle-hold window with no
+//                                                further injection afterward, to catch stuck/runaway
+//                                                firing. Isolated-server-only; refused while a
+//                                                css_poc_teleport verification is pending or a previous
+//                                                css_poc_firetest is still running.
 //   css_poc_stop <slot>                     -- cancel all injections/locks/replay for slot, unlock
 
 using System.Globalization;
@@ -203,6 +221,7 @@ public sealed class PocHarnessPlugin : BasePlugin
     {
         ClearTeleportVerification($"plugin unload (hotReload={hotReload})");
         ClearAimVerification($"plugin unload (hotReload={hotReload})");
+        ClearFireTest($"plugin unload (hotReload={hotReload})");
         base.Unload(hotReload);
     }
 
@@ -744,6 +763,296 @@ public sealed class PocHarnessPlugin : BasePlugin
         Log($"[setaim] sampling window for slot {_aimSlot} cleared without finishing: {reason}");
     }
 
+    // ---- FIRE: css_poc_weaponstate / css_poc_firetest -- uses ONLY the
+    // existing public IBotControllerApi.InjectUsercmd (already a production
+    // method, not diagnostic-only), no native changes. Evidence comes from
+    // independently-read CBasePlayerWeapon.Clip1 via CounterStrikeSharp's own
+    // schema, never from InjectUsercmd's own return value (acceptance of an
+    // injection is NOT proof a shot fired). ----
+
+    private static (bool ok, string weaponName, int clip1, string detail) ReadWeaponState(CCSPlayerPawn pawn)
+    {
+        try
+        {
+            var weapon = pawn.WeaponServices?.ActiveWeapon.Value;
+            if (weapon is null || !weapon.IsValid) return (false, "", 0, "no active weapon");
+            return (true, weapon.DesignerName, weapon.Clip1, "ok");
+        }
+        catch (Exception ex) { return (false, "", 0, $"unreadable:{ex.GetType().Name}"); }
+    }
+
+    [ConsoleCommand("css_poc_weaponstate", "Log current weapon identity + clip1 ammo for slot (independent read-only, no mutation)")]
+    [CommandHelper(minArgs: 1, usage: "<slot>", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnWeaponState(CCSPlayerController? caller, CommandInfo cmd)
+    {
+        if (!int.TryParse(cmd.GetArg(1), out var slot)) { Log("[weaponstate] bad slot arg"); return; }
+        var controller = ResolveSlot(slot);
+        if (controller is null || !controller.IsBot) { Log($"[weaponstate] slot {slot} is not a live bot -- refusing"); return; }
+        var pawn = controller.PlayerPawn?.Value;
+        if (pawn is null) { Log($"[weaponstate] slot {slot} has no pawn"); return; }
+        var (ok, weapon, clip1, detail) = ReadWeaponState(pawn);
+        Log(ok ? $"[weaponstate] slot={slot} weapon={weapon} clip1={clip1}" : $"[weaponstate] slot={slot} read FAILED: {detail}");
+    }
+
+    // Deliberately tiered, operator-controlled lockMode: "none" is the
+    // DEFAULT (least invasive first), per this task's explicit instruction
+    // not to assume Lock(All) is required for fire the way it was found
+    // necessary for movement. This command makes the tier an explicit,
+    // logged choice rather than hardcoding one -- the actual minimum
+    // requirement is an empirical runtime question, answered by running
+    // this command at each tier and reading the FIRE VERDICT below, not by
+    // this code's own design.
+    [ConsoleCommand("css_poc_firetest", "FIRE: inject discrete primary-attack presses and verify via independently-read clip1 ammo (diagnostic-only, isolated-server-only)")]
+    [CommandHelper(minArgs: 1, usage: "<slot> [pressCount=3] [pressDurationMs=50] [gapMs=200] [lockMode=none|aim|all, default none] [weaponDefIndex=4 Glock-18]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnFireTest(CCSPlayerController? caller, CommandInfo cmd)
+    {
+        if (!_isolatedEnvironmentConfirmed)
+        {
+            Log($"[firetest] REFUSED: isolated-server environment not confirmed (ModuleDirectory={ModuleDirectory}) -- failing closed.");
+            return;
+        }
+
+        ReapExpiredTeleportVerification();
+        if (_teleportVerifyPending)
+        {
+            Log($"[firetest] REJECTED: a css_poc_teleport verification is still pending on slot {_teleportVerifySlot} -- " +
+                $"retry in a moment (or css_poc_stop {_teleportVerifySlot}).");
+            return;
+        }
+
+        if (_fireActive)
+        {
+            Log($"[firetest] REJECTED: a previous css_poc_firetest is still running on slot {_fireSlot} -- " +
+                $"wait for it to finish, or css_poc_stop {_fireSlot}.");
+            return;
+        }
+
+        var rawArgs = new string?[6];
+        for (int i = 0; i < rawArgs.Length; i++) rawArgs[i] = i + 1 < cmd.ArgCount ? cmd.GetArg(i + 1) : null;
+        if (!FireSafety.TryParseFireTestArgs(rawArgs, out var req, out var parseError))
+        { Log($"[firetest] {parseError}"); return; }
+
+        var (_, pawn, why) = ResolveLiveBotPawn(req.Slot);
+        if (pawn is null) { Log($"[firetest] REFUSED: slot {req.Slot} {why}"); return; }
+
+        var api = BotControllerCap.Get();
+        if (api is null) { Log("[firetest] FAIL: capability not available (run gate1 first)"); return; }
+
+        // Deterministic test setup (per this task's instruction): force a
+        // known, simple semi-auto weapon via the EXISTING public
+        // SwitchBotWeapon, rather than trusting whatever the bot's own AI
+        // happened to equip -- an existing, already-public mechanism, not
+        // new architecture.
+        bool switched;
+        try { switched = api.SwitchBotWeapon(req.Slot, req.WeaponDefIndex); }
+        catch (Exception ex) { Log($"[firetest] SwitchBotWeapon threw {ex.GetType().Name}: {ex.Message}"); return; }
+        Log($"[firetest] SwitchBotWeapon(defIndex={req.WeaponDefIndex}) accepted={switched}");
+
+        LockKind? lockKind = req.LockMode switch { FireLockMode.Aim => LockKind.Aim, FireLockMode.All => LockKind.All, _ => null };
+        if (lockKind.HasValue)
+        {
+            bool locked;
+            try { locked = api.Lock(req.Slot, lockKind.Value); }
+            catch (Exception ex) { Log($"[firetest] Lock threw {ex.GetType().Name}: {ex.Message}"); return; }
+            Log($"[firetest] Lock({lockKind.Value}) accepted={locked} (requested suppression tier for this test)");
+        }
+        else
+        {
+            Log("[firetest] lockMode=none -- no Lock call issued; testing whether injected fire works with ZERO suppression.");
+        }
+
+        var (okBefore, weaponBefore, clipBefore, detailBefore) = ReadWeaponState(pawn);
+        if (!okBefore)
+        {
+            Log($"[firetest] REFUSED: cannot independently establish starting weapon/clip state ({detailBefore}) -- " +
+                "required before injecting anything, aborting.");
+            return;
+        }
+        Log($"[firetest] PRE slot={req.Slot} weapon={weaponBefore} clip1={clipBefore}");
+
+        uint pawnHandleRaw;
+        try { pawnHandleRaw = pawn.EntityHandle.Raw; }
+        catch (Exception ex) { Log($"[firetest] REFUSED: could not read pawn entity handle ({ex.GetType().Name}: {ex.Message})"); return; }
+
+        _fireSlot = req.Slot;
+        _firePawnHandleRaw = pawnHandleRaw;
+        _fireLockKind = lockKind;
+        _firePressesRequested = req.PressCount;
+        _firePressesIssued = 0;
+        _firePressDurationMs = req.PressDurationMs;
+        _fireGapMs = req.GapMs;
+        _fireClipBefore = clipBefore;
+        _fireWeaponBefore = weaponBefore;
+        _fireInjectionIds.Clear();
+        _fireTrace.Clear();
+        _fireTrace.Add((MonotonicMs(), "PRE", clipBefore));
+        _firePhase = FirePhase.Pressing;
+        _fireNextPressAtMs = MonotonicMs();
+        _fireActive = true;
+
+        Log($"[firetest] starting {req.PressCount} discrete press(es), {req.PressDurationMs}ms hold each, {req.GapMs}ms gap, " +
+            $"lockMode={(lockKind.HasValue ? lockKind.Value.ToString() : "none")}, buttonMask=IN_ATTACK(bit0) only. " +
+            "Each press is independently injected and independently read back -- not a single sustained hold.");
+    }
+
+    private enum FirePhase { Pressing, Settling, IdleHold }
+
+    private const long FireSettleMs = 300;    // after the last press, before reading the "after-shots" clip1
+    private const long FireIdleHoldMs = 1000; // extra idle window, NO injection issued, to catch stuck/runaway firing (criterion D)
+
+    private bool _fireActive;
+    private int _fireSlot;
+    private uint _firePawnHandleRaw;
+    private LockKind? _fireLockKind;
+    private int _firePressesRequested;
+    private int _firePressesIssued;
+    private int _firePressDurationMs;
+    private int _fireGapMs;
+    private long _fireNextPressAtMs;
+    private long _fireSettleUntilMs;
+    private long _fireIdleCheckUntilMs;
+    private int _fireClipBefore;
+    private string _fireWeaponBefore = "";
+    private int _fireClipAfterShots;
+    private FirePhase _firePhase;
+    private readonly List<long> _fireInjectionIds = new();
+    private readonly List<(long tMs, string note, int clip1)> _fireTrace = new();
+
+    // Called from OnTick while _fireActive. Never throws: any failure clears
+    // the test and logs it. Mirrors TickAimVerification's re-resolve-and-
+    // validate shape.
+    private void TickFireTest()
+    {
+        if (!_fireActive) return;
+
+        CCSPlayerPawn pawn;
+        try
+        {
+            var (_, p, why) = ResolveLiveBotPawn(_fireSlot);
+            if (p is null) { FinishFireTest(aborted: true, $"pawn no longer resolvable ({why})"); return; }
+            if (p.EntityHandle.Raw != _firePawnHandleRaw) { FinishFireTest(aborted: true, "pawn entity changed mid-test"); return; }
+            pawn = p;
+        }
+        catch (Exception ex) { FinishFireTest(aborted: true, $"pawn re-resolve threw {ex.GetType().Name}: {ex.Message}"); return; }
+
+        var api = BotControllerCap.Get();
+        if (api is null) { FinishFireTest(aborted: true, "capability unavailable mid-test"); return; }
+
+        long now = MonotonicMs();
+        switch (_firePhase)
+        {
+            case FirePhase.Pressing:
+                if (now < _fireNextPressAtMs) break;
+                if (_firePressesIssued >= _firePressesRequested)
+                {
+                    _firePhase = FirePhase.Settling;
+                    _fireSettleUntilMs = now + FireSettleMs;
+                    break;
+                }
+                long injId;
+                try { injId = api.InjectUsercmd(_fireSlot, FireSafety.AttackButtonMask, _firePressDurationMs); }
+                catch (Exception ex)
+                {
+                    Log($"[firetest] InjectUsercmd threw {ex.GetType().Name}: {ex.Message} on press #{_firePressesIssued + 1}");
+                    injId = -1;
+                }
+                _firePressesIssued++;
+                _fireInjectionIds.Add(injId);
+                Log($"[firetest] press #{_firePressesIssued}/{_firePressesRequested}: InjectUsercmd(buttonMask=IN_ATTACK, durationMs={_firePressDurationMs}) " +
+                    $"returned id={injId} " + (injId < 0
+                        ? "(REJECTED by the native layer -- see BotController_InjectUsercmd's own fail-closed conditions)"
+                        : "(injection ACCEPTED -- lifecycle acceptance only, NOT proof a shot fired; see clip1 below for that)"));
+                {
+                    var (ok, _, clip1, detail) = ReadWeaponState(pawn);
+                    _fireTrace.Add((now, ok ? $"after press #{_firePressesIssued}" : $"after press #{_firePressesIssued} READ FAILED: {detail}",
+                        ok ? clip1 : _fireTrace.Count > 0 ? _fireTrace[^1].clip1 : _fireClipBefore));
+                }
+                _fireNextPressAtMs = now + _firePressDurationMs + _fireGapMs;
+                break;
+
+            case FirePhase.Settling:
+                if (now < _fireSettleUntilMs) break;
+                {
+                    var (ok, _, clip1, detail) = ReadWeaponState(pawn);
+                    _fireClipAfterShots = ok ? clip1 : _fireTrace[^1].clip1;
+                    _fireTrace.Add((now, ok ? "after-shots settle" : $"after-shots settle READ FAILED: {detail}", _fireClipAfterShots));
+                }
+                _firePhase = FirePhase.IdleHold;
+                _fireIdleCheckUntilMs = now + FireIdleHoldMs;
+                break;
+
+            case FirePhase.IdleHold:
+                if (now < _fireIdleCheckUntilMs) break;
+                {
+                    var (ok, _, clip1, detail) = ReadWeaponState(pawn);
+                    _fireTrace.Add((now, ok ? "idle-hold end (no further injection issued)" : $"idle-hold end READ FAILED: {detail}",
+                        ok ? clip1 : _fireClipAfterShots));
+                }
+                FinishFireTest(aborted: false, null);
+                break;
+        }
+    }
+
+    // Logs the full trace, the FIRE verdict (clip1 before vs after-shots --
+    // never injection acceptance alone), and the release-semantics verdict
+    // (criterion D: no further clip1 drop during the idle-hold window),
+    // then cancels any outstanding injections defensively before clearing.
+    private void FinishFireTest(bool aborted, string? abortReason)
+    {
+        _fireActive = false;
+        var slot = _fireSlot;
+
+        Log($"[firetest] slot={slot} weapon={_fireWeaponBefore} requested presses={_firePressesRequested} issued={_firePressesIssued} " +
+            $"lockMode={(_fireLockKind.HasValue ? _fireLockKind.Value.ToString() : "none")}" +
+            (aborted ? $" -- ABORTED: {abortReason}" : ""));
+        foreach (var t in _fireTrace)
+            Log($"[firetest] t={t.tMs} {t.note} clip1={t.clip1}");
+
+        if (!aborted && _fireTrace.Count > 0)
+        {
+            int shotsConsumed = _fireClipBefore - _fireClipAfterShots;
+            Log($"[firetest] clip1 before={_fireClipBefore} after-shots={_fireClipAfterShots} consumed={shotsConsumed} " +
+                "(INDEPENDENTLY OBSERVED engine ammo state via CounterStrikeSharp's own weapon schema, not an injection return value)");
+
+            string fireVerdict = shotsConsumed <= 0
+                ? "FAIL (clip1 did not decrease -- no evidence a shot was actually fired, regardless of injection acceptance)"
+                : shotsConsumed >= _firePressesRequested
+                    ? $"PASS (clip1 decreased by {shotsConsumed}, consistent with {_firePressesRequested} discrete shot(s) fired)"
+                    : $"PARTIAL (clip1 decreased by {shotsConsumed}, fewer than the {_firePressesRequested} requested presses -- " +
+                      "some presses may not have each registered as a separate shot; inspect the per-press trace above)";
+            Log($"[firetest] FIRE VERDICT: {fireVerdict}");
+
+            var idleEntry = _fireTrace[^1];
+            if (idleEntry.note.StartsWith("idle-hold end", StringComparison.Ordinal))
+            {
+                int idleDrop = _fireClipAfterShots - idleEntry.clip1;
+                Log(idleDrop > 0
+                    ? $"[firetest] RELEASE-SEMANTICS VERDICT: FAIL -- clip1 dropped a further {idleDrop} during the idle-hold window with no injection active (firing appears stuck)."
+                    : "[firetest] RELEASE-SEMANTICS VERDICT: PASS -- no further clip1 change during the idle-hold window with no injection active (not stuck).");
+            }
+        }
+
+        var api = BotControllerCap.Get();
+        foreach (var id in _fireInjectionIds)
+        {
+            if (id < 0) continue;
+            try { api?.CancelUsercmdInjection(slot, id); } catch { /* best-effort, diagnostic only */ }
+        }
+    }
+
+    private void ClearFireTest(string reason)
+    {
+        if (!_fireActive) return;
+        _fireActive = false;
+        var api = BotControllerCap.Get();
+        foreach (var id in _fireInjectionIds)
+        {
+            if (id < 0) continue;
+            try { api?.CancelUsercmdInjection(_fireSlot, id); } catch { /* best-effort */ }
+        }
+        Log($"[firetest] cleared without finishing for slot {_fireSlot}: {reason}");
+    }
+
     // ---- GATE 2: movement ----
     private readonly Dictionary<int, long> _activeMovement = new();
 
@@ -884,6 +1193,8 @@ public sealed class PocHarnessPlugin : BasePlugin
         RegisterListener<Listeners.OnMapEnd>(() => ClearTeleportVerification("map end"));
         RegisterListener<Listeners.OnMapStart>(_ => ClearAimVerification("map start"));
         RegisterListener<Listeners.OnMapEnd>(() => ClearAimVerification("map end"));
+        RegisterListener<Listeners.OnMapStart>(_ => ClearFireTest("map start"));
+        RegisterListener<Listeners.OnMapEnd>(() => ClearFireTest("map end"));
 
         // Gate2C-only precision-control extension: round-transition detection.
         // Purely a counter -- this never blocks, cancels, or alters a running
@@ -909,6 +1220,7 @@ public sealed class PocHarnessPlugin : BasePlugin
     {
         TickTeleportVerification();
         TickAimVerification();
+        TickFireTest();
         if (_gate2Active && _gate2Pawn is not null)
         {
             var (ok, origin, eye, _) = ReadPawnState(_gate2Pawn);
@@ -1747,6 +2059,11 @@ public sealed class PocHarnessPlugin : BasePlugin
         // no lock or native state of its own either (Lock(Aim) is a separate,
         // independently-unlocked step below), so dropping it is safe.
         ClearAimVerification($"css_poc_stop {slot}");
+        // Same reasoning for a pending css_poc_firetest: cancels any
+        // outstanding injections itself (criterion H -- no held attack
+        // state survives a stop); whatever lock tier it used is released by
+        // the existing unconditional Unlock(All)/Unlock(Aim) calls below.
+        ClearFireTest($"css_poc_stop {slot}");
 
         var api = BotControllerCap.Get();
         bool wasGate2Active = _gate2Active || _gate2PostCancelActive;
@@ -1925,6 +2242,85 @@ public static class AimSafety
         { error = "bad yaw arg -- must be a finite number"; return false; }
 
         request = new AimRequest(slot, pitch, yaw);
+        error = string.Empty;
+        return true;
+    }
+}
+
+// ---- css_poc_firetest's pure decision logic, kept free of any
+// CounterStrikeSharp type AND free of BotControllerApi's LockKind (hence
+// the local FireLockMode enum below) for the same testability reason as
+// TeleportSafety/AimSafety above (poc/BotControllerPocHarness.Tests). ----
+
+public enum FireLockMode { None, Aim, All }
+
+public readonly record struct FireTestRequest(int Slot, int PressCount, int PressDurationMs, int GapMs, FireLockMode LockMode, int WeaponDefIndex);
+
+public static class FireSafety
+{
+    public const int DefaultPressCount = 3;
+    public const int DefaultPressDurationMs = 50;
+    public const int DefaultGapMs = 200;
+    public const int DefaultWeaponDefIndex = 4; // Glock-18: universal, infinite-buy, simple semi-auto
+
+    // Bit 0 -- the Source-engine primary-attack input. This codebase's own
+    // Gate2BDiagnostics.h (src/features/recorder/Gate2BDiagnostics.h) documents
+    // a "(1<<0)|(1<<11)" mask as already independently verified "grenade-
+    // related" via this exact InjectUsercmd path -- a grenade throw is
+    // triggered by the primary-attack input, corroborating (not merely
+    // assuming) that bit 0 functions as attack here. Every OTHER bit this
+    // codebase has independently verified (kInForward=1<<3, kInBack=1<<4,
+    // kInMoveLeft=1<<9, kInMoveRight=1<<10, see InputInjector.cpp) matches
+    // the standard, stable Source-engine button layout exactly, the same
+    // convention bit 0 (IN_ATTACK) and bit 11 (IN_ATTACK2) are drawn from.
+    public const ulong AttackButtonMask = 1UL << 0;
+
+    // args: [slot, pressCount?, pressDurationMs?, gapMs?, lockMode?, weaponDefIndex?].
+    // Every optional arg falls back to its default when omitted/blank, never
+    // when present-but-invalid -- a typo must be rejected, not silently
+    // replaced.
+    public static bool TryParseFireTestArgs(IReadOnlyList<string?> args, out FireTestRequest request, out string error)
+    {
+        request = default;
+        string? Arg(int i) => i < args.Count ? args[i] : null;
+
+        if (!int.TryParse(Arg(0), NumberStyles.Integer, CultureInfo.InvariantCulture, out var slot) || slot < 0)
+        { error = "bad slot arg -- must be a non-negative integer"; return false; }
+
+        int pressCount = DefaultPressCount;
+        var pressCountArg = Arg(1);
+        if (!string.IsNullOrWhiteSpace(pressCountArg) &&
+            (!int.TryParse(pressCountArg, NumberStyles.Integer, CultureInfo.InvariantCulture, out pressCount) || pressCount < 1))
+        { error = "bad pressCount arg -- must be a positive integer (omit for default 3)"; return false; }
+
+        int pressDurationMs = DefaultPressDurationMs;
+        var pdArg = Arg(2);
+        if (!string.IsNullOrWhiteSpace(pdArg) &&
+            (!int.TryParse(pdArg, NumberStyles.Integer, CultureInfo.InvariantCulture, out pressDurationMs) || pressDurationMs < 0))
+        { error = "bad pressDurationMs arg -- must be a non-negative integer (omit for default 50; 0 means a single-tick press, see InputInjector.cpp's PendingPress->PendingRelease transition, NOT no press)"; return false; }
+
+        int gapMs = DefaultGapMs;
+        var gapArg = Arg(3);
+        if (!string.IsNullOrWhiteSpace(gapArg) &&
+            (!int.TryParse(gapArg, NumberStyles.Integer, CultureInfo.InvariantCulture, out gapMs) || gapMs < 0))
+        { error = "bad gapMs arg -- must be a non-negative integer (omit for default 200)"; return false; }
+
+        FireLockMode lockMode = FireLockMode.None;
+        var lockModeArg = Arg(4);
+        if (!string.IsNullOrWhiteSpace(lockModeArg) && !lockModeArg.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            if (lockModeArg.Equals("aim", StringComparison.OrdinalIgnoreCase)) lockMode = FireLockMode.Aim;
+            else if (lockModeArg.Equals("all", StringComparison.OrdinalIgnoreCase)) lockMode = FireLockMode.All;
+            else { error = $"bad lockMode arg '{lockModeArg}' -- must be none|aim|all (omit for default none)"; return false; }
+        }
+
+        int weaponDefIndex = DefaultWeaponDefIndex;
+        var wdArg = Arg(5);
+        if (!string.IsNullOrWhiteSpace(wdArg) &&
+            (!int.TryParse(wdArg, NumberStyles.Integer, CultureInfo.InvariantCulture, out weaponDefIndex) || weaponDefIndex < 0))
+        { error = "bad weaponDefIndex arg -- must be a non-negative integer (omit for default 4, Glock-18)"; return false; }
+
+        request = new FireTestRequest(slot, pressCount, pressDurationMs, gapMs, lockMode, weaponDefIndex);
         error = string.Empty;
         return true;
     }
