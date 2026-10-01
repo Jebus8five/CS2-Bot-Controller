@@ -79,6 +79,10 @@ namespace BotControllerApi
         public bool CancelUsercmdSuppression(int slot, long suppressionId)
             => BotController.CancelUsercmdSuppression(slot, suppressionId);
 
+        // ---- aim ----
+        public bool SetEyeAngles(int slot, float pitch, float yaw)
+            => BotController.SetEyeAngles(slot, pitch, yaw);
+
         // ---- profile ----
         public bool GetBotProfile(int slot, out BotProfileData profile)
             => BotController.GetBotProfile(slot, out profile);

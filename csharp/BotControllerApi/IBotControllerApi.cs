@@ -103,6 +103,15 @@ namespace BotControllerApi
         // Cancels one persistent usercmd suppression by its token
         bool CancelUsercmdSuppression(int slot, long suppressionId);
 
+        // ---- aim ----
+
+        // Writes a live bot's eye angles via the engine's own SetEyeAngles path
+        // (the same generic primitive replay uses internally). Independent of
+        // Lock state and of replay/synthetic-subtick. False on any failure
+        // (invalid slot, no live bot, or a stale/missing pawn) -- never
+        // partially applies an angle.
+        bool SetEyeAngles(int slot, float pitch, float yaw);
+
         // ---- profile ----
 
         // Read the BotProfile of the bot on this slot. False if the slot has no

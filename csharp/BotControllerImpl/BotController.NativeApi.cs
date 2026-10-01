@@ -68,6 +68,11 @@ namespace BotControllerApi
         private static extern int BotController_CancelUsercmdSuppression(
             int slot, long suppressionId);
 
+        // Imports the native live-aim export (BotController::ApplyEyeAngles under the hood)
+        [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int BotController_SetEyeAngles(
+            int slot, float pitch, float yaw);
+
         [DllImport("BotController", CallingConvention = CallingConvention.Cdecl)]
         private static extern int BotController_StartRecord(int slot);
 
@@ -217,6 +222,10 @@ namespace BotControllerApi
         // Cancels one persistent native usercmd suppression by its token
         public static bool CancelUsercmdSuppression(int slot, long suppressionId)
             => BotController_CancelUsercmdSuppression(slot, suppressionId) == 0;
+
+        // Writes a live bot's eye angles via the native SetEyeAngles export
+        public static bool SetEyeAngles(int slot, float pitch, float yaw)
+            => BotController_SetEyeAngles(slot, pitch, yaw) == 0;
 
         // ---- locks ----
 

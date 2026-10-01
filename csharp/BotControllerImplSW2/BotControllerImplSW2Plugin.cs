@@ -133,6 +133,9 @@ public partial class BotControllerImplSW2Plugin(ISwiftlyCore core) : BasePlugin(
         public bool CancelUsercmdSuppression(int slot, long suppressionId)
             => BotController.CancelUsercmdSuppression(slot, suppressionId);
 
+        public bool SetEyeAngles(int slot, float pitch, float yaw)
+            => BotController.SetEyeAngles(slot, pitch, yaw);
+
         // Returns the live profile data for a bot slot.
         public bool GetBotProfile(int slot, out BotProfileData profile)
             => BotController.GetBotProfile(slot, out profile);
