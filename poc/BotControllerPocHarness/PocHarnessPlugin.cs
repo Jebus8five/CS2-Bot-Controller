@@ -103,6 +103,20 @@
 //                                                firing. Isolated-server-only; refused while a
 //                                                css_poc_teleport verification is pending or a previous
 //                                                css_poc_firetest is still running.
+//   css_poc_jumptest <slot> [jumpCount=2] [pressDurationMs=50] [lockMode=none|aim|all]
+//                                             -- injects the candidate IN_JUMP bit (1<<1, HYPOTHESIS --
+//                                                not yet independently verified, unlike the movement/
+//                                                attack bits) and verifies via independently-read
+//                                                LastJumpTick/AbsVelocity.Z/origin.Z, never injection
+//                                                acceptance. Waits for a confirmed/timed-out grounded
+//                                                state before each discrete jump. Same none-first
+//                                                lockMode tiering and isolated-only/teleport-pending
+//                                                guard as css_poc_firetest.
+//   css_poc_crouchtest <slot> [holdCount=2] [holdMs=800] [lockMode=none|aim|all]
+//                                             -- injects/holds the candidate IN_DUCK bit (1<<2,
+//                                                HYPOTHESIS) and verifies via independently-read
+//                                                MovementServices.Ducked/Ducking/DuckAmount, including
+//                                                a post-release check that it returns toward un-crouched.
 //   css_poc_stop <slot>                     -- cancel all injections/locks/replay for slot, unlock
 
 using System.Globalization;
@@ -222,6 +236,8 @@ public sealed class PocHarnessPlugin : BasePlugin
         ClearTeleportVerification($"plugin unload (hotReload={hotReload})");
         ClearAimVerification($"plugin unload (hotReload={hotReload})");
         ClearFireTest($"plugin unload (hotReload={hotReload})");
+        ClearJumpTest($"plugin unload (hotReload={hotReload})");
+        ClearCrouchTest($"plugin unload (hotReload={hotReload})");
         base.Unload(hotReload);
     }
 
@@ -1053,6 +1069,441 @@ public sealed class PocHarnessPlugin : BasePlugin
         Log($"[firetest] cleared without finishing for slot {_fireSlot}: {reason}");
     }
 
+    // ---- JUMP: css_poc_jumptest -- same architecture as css_poc_firetest:
+    // existing public InjectUsercmd only, no native changes. IN_JUMP=1<<1 is
+    // a HYPOTHESIS (standard Source layout), not yet independently verified
+    // in this codebase the way the movement/attack bits are -- a successful
+    // jump arc (LastJumpTick advancing, vertical velocity/height) is itself
+    // the verification, exactly as fire's clip1 decrease verified bit 0.
+    private static (bool ok, bool onGround, int lastJumpTick, string detail) ReadJumpState(CCSPlayerPawn pawn)
+    {
+        try
+        {
+            bool onGround = pawn.OnGroundLastTick;
+            var ms = pawn.MovementServices;
+            if (ms is null) return (false, false, -1, "no MovementServices");
+            return (true, onGround, ms.LastJumpTick, "ok");
+        }
+        catch (Exception ex) { return (false, false, -1, $"unreadable:{ex.GetType().Name}"); }
+    }
+
+    [ConsoleCommand("css_poc_jumptest", "JUMP: inject candidate IN_JUMP bit and verify via independently-observed LastJumpTick/velocity.Z/height (diagnostic-only, isolated-server-only)")]
+    [CommandHelper(minArgs: 1, usage: "<slot> [jumpCount=2] [pressDurationMs=50] [lockMode=none|aim|all, default none]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnJumpTest(CCSPlayerController? caller, CommandInfo cmd)
+    {
+        if (!_isolatedEnvironmentConfirmed)
+        {
+            Log($"[jumptest] REFUSED: isolated-server environment not confirmed (ModuleDirectory={ModuleDirectory}) -- failing closed.");
+            return;
+        }
+        ReapExpiredTeleportVerification();
+        if (_teleportVerifyPending)
+        {
+            Log($"[jumptest] REJECTED: a css_poc_teleport verification is still pending on slot {_teleportVerifySlot} -- retry shortly.");
+            return;
+        }
+        if (_jumpActive)
+        {
+            Log($"[jumptest] REJECTED: a previous css_poc_jumptest is still running on slot {_jumpSlot} -- wait, or css_poc_stop {_jumpSlot}.");
+            return;
+        }
+
+        var rawArgs = new string?[4];
+        for (int i = 0; i < rawArgs.Length; i++) rawArgs[i] = i + 1 < cmd.ArgCount ? cmd.GetArg(i + 1) : null;
+        if (!MotorTestSafety.TryParseJumpTestArgs(rawArgs, out var req, out var parseError))
+        { Log($"[jumptest] {parseError}"); return; }
+
+        var (_, pawn, why) = ResolveLiveBotPawn(req.Slot);
+        if (pawn is null) { Log($"[jumptest] REFUSED: slot {req.Slot} {why}"); return; }
+        var api = BotControllerCap.Get();
+        if (api is null) { Log("[jumptest] FAIL: capability not available (run gate1 first)"); return; }
+
+        LockKind? lockKind = req.LockMode switch { FireLockMode.Aim => LockKind.Aim, FireLockMode.All => LockKind.All, _ => null };
+        if (lockKind.HasValue)
+        {
+            bool locked;
+            try { locked = api.Lock(req.Slot, lockKind.Value); }
+            catch (Exception ex) { Log($"[jumptest] Lock threw {ex.GetType().Name}: {ex.Message}"); return; }
+            Log($"[jumptest] Lock({lockKind.Value}) accepted={locked} (requested suppression tier for this test)");
+        }
+        else
+        {
+            Log("[jumptest] lockMode=none -- no Lock call issued; testing whether injected jump works with ZERO suppression.");
+        }
+
+        var (okPre, onGroundPre, tickPre, detailPre) = ReadJumpState(pawn);
+        var (okPosPre, originPre, _, detailPosPre) = ReadPawnState(pawn);
+        if (!okPre || !okPosPre)
+        {
+            Log($"[jumptest] REFUSED: cannot independently establish starting ground/position state (jump:{detailPre} pos:{detailPosPre}) -- aborting.");
+            return;
+        }
+        Log($"[jumptest] PRE slot={req.Slot} onGround={onGroundPre} lastJumpTick={tickPre} z={originPre!.Z:F4}");
+
+        uint pawnHandleRaw;
+        try { pawnHandleRaw = pawn.EntityHandle.Raw; }
+        catch (Exception ex) { Log($"[jumptest] REFUSED: could not read pawn entity handle ({ex.GetType().Name}: {ex.Message})"); return; }
+
+        _jumpSlot = req.Slot;
+        _jumpPawnHandleRaw = pawnHandleRaw;
+        _jumpLockKind = lockKind;
+        _jumpCountRequested = req.JumpCount;
+        _jumpAttemptsDone = 0;
+        _jumpPressDurationMs = req.PressDurationMs;
+        _jumpTrace.Clear();
+        _jumpInjectionIds.Clear();
+        _jumpPhase = JumpPhase.WaitGroundedBefore;
+        _jumpPhaseDeadlineMs = MonotonicMs() + JumpGroundWaitTimeoutMs;
+        _jumpActive = true;
+
+        Log($"[jumptest] starting {req.JumpCount} discrete jump(s), {req.PressDurationMs}ms press each, lockMode={(lockKind.HasValue ? lockKind.Value.ToString() : "none")}, " +
+            "buttonMask=IN_JUMP(bit1, HYPOTHESIS) only. Each jump waits for a confirmed/timed-out grounded state first, per criterion D.");
+    }
+
+    private enum JumpPhase { WaitGroundedBefore, Sampling, IdleHold }
+
+    private const long JumpGroundWaitTimeoutMs = 2000;
+    private const long JumpSampleMs = 900;     // long enough to capture a full CS2 jump arc and landing
+    private const long JumpIdleHoldMs = 600;   // extra window with no injection, to catch a stuck jump button
+
+    private bool _jumpActive;
+    private int _jumpSlot;
+    private uint _jumpPawnHandleRaw;
+    private LockKind? _jumpLockKind;
+    private int _jumpCountRequested;
+    private int _jumpAttemptsDone;
+    private int _jumpPressDurationMs;
+    private JumpPhase _jumpPhase;
+    private long _jumpPhaseDeadlineMs;
+    private int _jumpAttemptPreTick;
+    private float _jumpAttemptPreZ;
+    private float _jumpAttemptPeakVelZ;
+    private float _jumpAttemptPeakZ;
+    private readonly List<long> _jumpInjectionIds = new();
+    private readonly List<(long tMs, string note, bool onGround, int lastJumpTick, float velZ, float z)> _jumpTrace = new();
+
+    private void TickJumpTest()
+    {
+        if (!_jumpActive) return;
+
+        CCSPlayerPawn pawn;
+        try
+        {
+            var (_, p, why) = ResolveLiveBotPawn(_jumpSlot);
+            if (p is null) { FinishJumpTest(aborted: true, $"pawn no longer resolvable ({why})"); return; }
+            if (p.EntityHandle.Raw != _jumpPawnHandleRaw) { FinishJumpTest(aborted: true, "pawn entity changed mid-test"); return; }
+            pawn = p;
+        }
+        catch (Exception ex) { FinishJumpTest(aborted: true, $"pawn re-resolve threw {ex.GetType().Name}: {ex.Message}"); return; }
+
+        var api = BotControllerCap.Get();
+        if (api is null) { FinishJumpTest(aborted: true, "capability unavailable mid-test"); return; }
+
+        long now = MonotonicMs();
+        var (jOk, onGround, lastJumpTick, jDetail) = ReadJumpState(pawn);
+        var (pOk, origin, _, pDetail) = ReadPawnState(pawn);
+        var (vOk, velocity, vDetail) = ReadPawnVelocity(pawn);
+        float z = pOk ? origin!.Z : 0f;
+        float velZ = vOk ? velocity!.Z : 0f;
+
+        switch (_jumpPhase)
+        {
+            case JumpPhase.WaitGroundedBefore:
+                bool timedOut = now >= _jumpPhaseDeadlineMs;
+                if (!jOk || !pOk)
+                {
+                    _jumpTrace.Add((now, $"WaitGrounded READ FAILED (jump:{jDetail} pos:{pDetail})", false, -1, 0, 0));
+                    if (!timedOut) break;
+                }
+                if (!onGround && !timedOut) break; // keep waiting (bounded)
+
+                _jumpTrace.Add((now, onGround ? "grounded confirmed -- jumping" : "grounded NOT confirmed within timeout -- jumping anyway",
+                    onGround, lastJumpTick, velZ, z));
+                _jumpAttemptPreTick = lastJumpTick;
+                _jumpAttemptPreZ = z;
+                _jumpAttemptPeakVelZ = velZ;
+                _jumpAttemptPeakZ = z;
+
+                long injId;
+                try { injId = api.InjectUsercmd(_jumpSlot, MotorTestSafety.JumpButtonMask, _jumpPressDurationMs); }
+                catch (Exception ex) { Log($"[jumptest] InjectUsercmd threw {ex.GetType().Name}: {ex.Message}"); injId = -1; }
+                _jumpInjectionIds.Add(injId);
+                Log($"[jumptest] jump #{_jumpAttemptsDone + 1}/{_jumpCountRequested}: InjectUsercmd(buttonMask=IN_JUMP, durationMs={_jumpPressDurationMs}) returned id={injId} " +
+                    (injId < 0 ? "(REJECTED)" : "(ACCEPTED -- lifecycle only, not proof of an actual jump)"));
+
+                _jumpPhase = JumpPhase.Sampling;
+                _jumpPhaseDeadlineMs = now + JumpSampleMs;
+                break;
+
+            case JumpPhase.Sampling:
+                if (jOk && pOk)
+                {
+                    _jumpAttemptPeakVelZ = MathF.Max(_jumpAttemptPeakVelZ, velZ);
+                    _jumpAttemptPeakZ = MathF.Max(_jumpAttemptPeakZ, z);
+                    _jumpTrace.Add((now, "sampling", onGround, lastJumpTick, velZ, z));
+                }
+                if (now < _jumpPhaseDeadlineMs) break;
+
+                bool tickAdvanced = jOk && lastJumpTick != _jumpAttemptPreTick && lastJumpTick >= 0;
+                float heightGain = _jumpAttemptPeakZ - _jumpAttemptPreZ;
+                Log($"[jumptest] jump #{_jumpAttemptsDone + 1} result: LastJumpTick {_jumpAttemptPreTick}->observed-changed={tickAdvanced}, " +
+                    $"peakVelZ={_jumpAttemptPeakVelZ:F2}, heightGain={heightGain:F4}, re-grounded-by-end={onGround} -- " +
+                    (tickAdvanced && _jumpAttemptPeakVelZ > 50f && heightGain > 2f
+                        ? "JUMP VERDICT: PASS (engine-recorded jump + upward velocity + measurable height gain)"
+                        : "JUMP VERDICT: FAIL (missing one or more of: LastJumpTick advance, positive vertical velocity, measurable height gain)"));
+
+                _jumpAttemptsDone++;
+                if (_jumpAttemptsDone >= _jumpCountRequested)
+                {
+                    _jumpPhase = JumpPhase.IdleHold;
+                    _jumpPhaseDeadlineMs = now + JumpIdleHoldMs;
+                    break;
+                }
+                _jumpPhase = JumpPhase.WaitGroundedBefore;
+                _jumpPhaseDeadlineMs = now + JumpGroundWaitTimeoutMs;
+                break;
+
+            case JumpPhase.IdleHold:
+                if (now < _jumpPhaseDeadlineMs) break;
+                FinishJumpTest(aborted: false, null);
+                break;
+        }
+    }
+
+    private void FinishJumpTest(bool aborted, string? abortReason)
+    {
+        _jumpActive = false;
+        Log($"[jumptest] slot={_jumpSlot} requested={_jumpCountRequested} completed={_jumpAttemptsDone} " +
+            $"lockMode={(_jumpLockKind.HasValue ? _jumpLockKind.Value.ToString() : "none")}" + (aborted ? $" -- ABORTED: {abortReason}" : ""));
+        foreach (var t in _jumpTrace)
+            Log($"[jumptest] t={t.tMs} {t.note} onGround={t.onGround} lastJumpTick={t.lastJumpTick} velZ={t.velZ:F2} z={t.z:F4}");
+        if (!aborted)
+            Log("[jumptest] RELEASE-SEMANTICS: idle-hold window completed with no further injection -- see per-jump VERDICT lines above for " +
+                "whether the bit 1<<1 hypothesis was confirmed by actual engine jump evidence.");
+
+        var api = BotControllerCap.Get();
+        foreach (var id in _jumpInjectionIds)
+        {
+            if (id < 0) continue;
+            try { api?.CancelUsercmdInjection(_jumpSlot, id); } catch { /* best-effort */ }
+        }
+    }
+
+    private void ClearJumpTest(string reason)
+    {
+        if (!_jumpActive) return;
+        _jumpActive = false;
+        var api = BotControllerCap.Get();
+        foreach (var id in _jumpInjectionIds)
+        {
+            if (id < 0) continue;
+            try { api?.CancelUsercmdInjection(_jumpSlot, id); } catch { /* best-effort */ }
+        }
+        Log($"[jumptest] cleared without finishing for slot {_jumpSlot}: {reason}");
+    }
+
+    // ---- CROUCH: css_poc_crouchtest -- same architecture again. IN_DUCK=1<<2
+    // is a HYPOTHESIS until Ducked/DuckAmount independently confirm it.
+    private static (bool ok, bool ducked, bool ducking, float duckAmount, string detail) ReadCrouchState(CCSPlayerPawn pawn)
+    {
+        try
+        {
+            var ms = pawn.MovementServices;
+            if (ms is null) return (false, false, false, 0f, "no MovementServices");
+            return (true, ms.Ducked, ms.Ducking, ms.DuckAmount, "ok");
+        }
+        catch (Exception ex) { return (false, false, false, 0f, $"unreadable:{ex.GetType().Name}"); }
+    }
+
+    [ConsoleCommand("css_poc_crouchtest", "CROUCH: inject/hold candidate IN_DUCK bit and verify via independently-observed Ducked/DuckAmount (diagnostic-only, isolated-server-only)")]
+    [CommandHelper(minArgs: 1, usage: "<slot> [holdCount=2] [holdMs=800] [lockMode=none|aim|all, default none]", whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    public void OnCrouchTest(CCSPlayerController? caller, CommandInfo cmd)
+    {
+        if (!_isolatedEnvironmentConfirmed)
+        {
+            Log($"[crouchtest] REFUSED: isolated-server environment not confirmed (ModuleDirectory={ModuleDirectory}) -- failing closed.");
+            return;
+        }
+        ReapExpiredTeleportVerification();
+        if (_teleportVerifyPending)
+        {
+            Log($"[crouchtest] REJECTED: a css_poc_teleport verification is still pending on slot {_teleportVerifySlot} -- retry shortly.");
+            return;
+        }
+        if (_crouchActive)
+        {
+            Log($"[crouchtest] REJECTED: a previous css_poc_crouchtest is still running on slot {_crouchSlot} -- wait, or css_poc_stop {_crouchSlot}.");
+            return;
+        }
+
+        var rawArgs = new string?[3];
+        for (int i = 0; i < rawArgs.Length; i++) rawArgs[i] = i + 1 < cmd.ArgCount ? cmd.GetArg(i + 1) : null;
+        if (!MotorTestSafety.TryParseCrouchTestArgs(rawArgs, out var req, out var parseError))
+        { Log($"[crouchtest] {parseError}"); return; }
+
+        var (_, pawn, why) = ResolveLiveBotPawn(req.Slot);
+        if (pawn is null) { Log($"[crouchtest] REFUSED: slot {req.Slot} {why}"); return; }
+        var api = BotControllerCap.Get();
+        if (api is null) { Log("[crouchtest] FAIL: capability not available (run gate1 first)"); return; }
+
+        LockKind? lockKind = req.LockMode switch { FireLockMode.Aim => LockKind.Aim, FireLockMode.All => LockKind.All, _ => null };
+        if (lockKind.HasValue)
+        {
+            bool locked;
+            try { locked = api.Lock(req.Slot, lockKind.Value); }
+            catch (Exception ex) { Log($"[crouchtest] Lock threw {ex.GetType().Name}: {ex.Message}"); return; }
+            Log($"[crouchtest] Lock({lockKind.Value}) accepted={locked} (requested suppression tier for this test)");
+        }
+        else
+        {
+            Log("[crouchtest] lockMode=none -- no Lock call issued; testing whether injected crouch works with ZERO suppression.");
+        }
+
+        var (okPre, duckedPre, duckingPre, amountPre, detailPre) = ReadCrouchState(pawn);
+        if (!okPre)
+        {
+            Log($"[crouchtest] REFUSED: cannot independently establish starting duck state ({detailPre}) -- aborting.");
+            return;
+        }
+        Log($"[crouchtest] PRE slot={req.Slot} ducked={duckedPre} ducking={duckingPre} duckAmount={amountPre:F4}");
+
+        uint pawnHandleRaw;
+        try { pawnHandleRaw = pawn.EntityHandle.Raw; }
+        catch (Exception ex) { Log($"[crouchtest] REFUSED: could not read pawn entity handle ({ex.GetType().Name}: {ex.Message})"); return; }
+
+        _crouchSlot = req.Slot;
+        _crouchPawnHandleRaw = pawnHandleRaw;
+        _crouchLockKind = lockKind;
+        _crouchHoldCountRequested = req.HoldCount;
+        _crouchHoldsDone = 0;
+        _crouchHoldMs = req.HoldMs;
+        _crouchTrace.Clear();
+        _crouchInjectionIds.Clear();
+        _crouchPhase = CrouchPhase.Idle;
+        _crouchPhaseDeadlineMs = MonotonicMs();
+        _crouchActive = true;
+
+        Log($"[crouchtest] starting {req.HoldCount} discrete hold(s), {req.HoldMs}ms each, lockMode={(lockKind.HasValue ? lockKind.Value.ToString() : "none")}, " +
+            "buttonMask=IN_DUCK(bit2, HYPOTHESIS) only.");
+    }
+
+    private enum CrouchPhase { Idle, Holding, ReleaseCheck, FinalIdle }
+
+    private const long CrouchGapMs = 400;        // between holds, and before starting the first
+    private const long CrouchReleaseCheckMs = 500; // after a hold ends, window to confirm it un-crouches
+
+    private bool _crouchActive;
+    private int _crouchSlot;
+    private uint _crouchPawnHandleRaw;
+    private LockKind? _crouchLockKind;
+    private int _crouchHoldCountRequested;
+    private int _crouchHoldsDone;
+    private int _crouchHoldMs;
+    private CrouchPhase _crouchPhase;
+    private long _crouchPhaseDeadlineMs;
+    private bool _crouchReachedDuring;
+    private readonly List<long> _crouchInjectionIds = new();
+    private readonly List<(long tMs, string note, bool ducked, bool ducking, float duckAmount)> _crouchTrace = new();
+
+    private void TickCrouchTest()
+    {
+        if (!_crouchActive) return;
+
+        CCSPlayerPawn pawn;
+        try
+        {
+            var (_, p, why) = ResolveLiveBotPawn(_crouchSlot);
+            if (p is null) { FinishCrouchTest(aborted: true, $"pawn no longer resolvable ({why})"); return; }
+            if (p.EntityHandle.Raw != _crouchPawnHandleRaw) { FinishCrouchTest(aborted: true, "pawn entity changed mid-test"); return; }
+            pawn = p;
+        }
+        catch (Exception ex) { FinishCrouchTest(aborted: true, $"pawn re-resolve threw {ex.GetType().Name}: {ex.Message}"); return; }
+
+        var api = BotControllerCap.Get();
+        if (api is null) { FinishCrouchTest(aborted: true, "capability unavailable mid-test"); return; }
+
+        long now = MonotonicMs();
+        var (ok, ducked, ducking, amount, detail) = ReadCrouchState(pawn);
+        if (ok) _crouchTrace.Add((now, _crouchPhase.ToString(), ducked, ducking, amount));
+
+        switch (_crouchPhase)
+        {
+            case CrouchPhase.Idle:
+                if (now < _crouchPhaseDeadlineMs) break;
+                long injId;
+                try { injId = api.InjectUsercmd(_crouchSlot, MotorTestSafety.DuckButtonMask, _crouchHoldMs); }
+                catch (Exception ex) { Log($"[crouchtest] InjectUsercmd threw {ex.GetType().Name}: {ex.Message}"); injId = -1; }
+                _crouchInjectionIds.Add(injId);
+                _crouchReachedDuring = false;
+                Log($"[crouchtest] hold #{_crouchHoldsDone + 1}/{_crouchHoldCountRequested}: InjectUsercmd(buttonMask=IN_DUCK, durationMs={_crouchHoldMs}) returned id={injId} " +
+                    (injId < 0 ? "(REJECTED)" : "(ACCEPTED -- lifecycle only, not proof of an actual crouch)"));
+                _crouchPhase = CrouchPhase.Holding;
+                _crouchPhaseDeadlineMs = now + _crouchHoldMs;
+                break;
+
+            case CrouchPhase.Holding:
+                if (ok && (ducked || ducking || amount > 0.1f)) _crouchReachedDuring = true;
+                if (now < _crouchPhaseDeadlineMs) break;
+                Log($"[crouchtest] hold #{_crouchHoldsDone + 1} end-of-hold: ducked={ducked} ducking={ducking} duckAmount={amount:F4} " +
+                    $"reachedDuckedAtSomePoint={_crouchReachedDuring} -- " +
+                    (_crouchReachedDuring ? "CROUCH VERDICT: PASS (independent Ducked/DuckAmount state confirms an actual crouch)"
+                                           : "CROUCH VERDICT: FAIL (Ducked/Ducking/DuckAmount never left the resting state during the hold)"));
+                _crouchPhase = CrouchPhase.ReleaseCheck;
+                _crouchPhaseDeadlineMs = now + CrouchReleaseCheckMs;
+                break;
+
+            case CrouchPhase.ReleaseCheck:
+                if (now < _crouchPhaseDeadlineMs) break;
+                Log($"[crouchtest] hold #{_crouchHoldsDone + 1} release check: ducked={ducked} ducking={ducking} duckAmount={amount:F4} -- " +
+                    (!ducked && amount < 0.5f ? "RELEASE VERDICT: PASS (returned toward un-crouched after hold ended)"
+                                               : "RELEASE VERDICT: FAIL or STILL SETTLING (still substantially ducked after the release-check window -- inspect trace)"));
+                _crouchHoldsDone++;
+                if (_crouchHoldsDone >= _crouchHoldCountRequested)
+                {
+                    _crouchPhase = CrouchPhase.FinalIdle;
+                    _crouchPhaseDeadlineMs = now + CrouchReleaseCheckMs;
+                    break;
+                }
+                _crouchPhase = CrouchPhase.Idle;
+                _crouchPhaseDeadlineMs = now + CrouchGapMs;
+                break;
+
+            case CrouchPhase.FinalIdle:
+                if (now < _crouchPhaseDeadlineMs) break;
+                FinishCrouchTest(aborted: false, null);
+                break;
+        }
+    }
+
+    private void FinishCrouchTest(bool aborted, string? abortReason)
+    {
+        _crouchActive = false;
+        Log($"[crouchtest] slot={_crouchSlot} requested={_crouchHoldCountRequested} completed={_crouchHoldsDone} " +
+            $"lockMode={(_crouchLockKind.HasValue ? _crouchLockKind.Value.ToString() : "none")}" + (aborted ? $" -- ABORTED: {abortReason}" : ""));
+        foreach (var t in _crouchTrace)
+            Log($"[crouchtest] t={t.tMs} phase={t.note} ducked={t.ducked} ducking={t.ducking} duckAmount={t.duckAmount:F4}");
+
+        var api = BotControllerCap.Get();
+        foreach (var id in _crouchInjectionIds)
+        {
+            if (id < 0) continue;
+            try { api?.CancelUsercmdInjection(_crouchSlot, id); } catch { /* best-effort */ }
+        }
+    }
+
+    private void ClearCrouchTest(string reason)
+    {
+        if (!_crouchActive) return;
+        _crouchActive = false;
+        var api = BotControllerCap.Get();
+        foreach (var id in _crouchInjectionIds)
+        {
+            if (id < 0) continue;
+            try { api?.CancelUsercmdInjection(_crouchSlot, id); } catch { /* best-effort */ }
+        }
+        Log($"[crouchtest] cleared without finishing for slot {_crouchSlot}: {reason}");
+    }
+
     // ---- GATE 2: movement ----
     private readonly Dictionary<int, long> _activeMovement = new();
 
@@ -1195,6 +1646,10 @@ public sealed class PocHarnessPlugin : BasePlugin
         RegisterListener<Listeners.OnMapEnd>(() => ClearAimVerification("map end"));
         RegisterListener<Listeners.OnMapStart>(_ => ClearFireTest("map start"));
         RegisterListener<Listeners.OnMapEnd>(() => ClearFireTest("map end"));
+        RegisterListener<Listeners.OnMapStart>(_ => ClearJumpTest("map start"));
+        RegisterListener<Listeners.OnMapEnd>(() => ClearJumpTest("map end"));
+        RegisterListener<Listeners.OnMapStart>(_ => ClearCrouchTest("map start"));
+        RegisterListener<Listeners.OnMapEnd>(() => ClearCrouchTest("map end"));
 
         // Gate2C-only precision-control extension: round-transition detection.
         // Purely a counter -- this never blocks, cancels, or alters a running
@@ -1221,6 +1676,8 @@ public sealed class PocHarnessPlugin : BasePlugin
         TickTeleportVerification();
         TickAimVerification();
         TickFireTest();
+        TickJumpTest();
+        TickCrouchTest();
         if (_gate2Active && _gate2Pawn is not null)
         {
             var (ok, origin, eye, _) = ReadPawnState(_gate2Pawn);
@@ -2064,6 +2521,10 @@ public sealed class PocHarnessPlugin : BasePlugin
         // state survives a stop); whatever lock tier it used is released by
         // the existing unconditional Unlock(All)/Unlock(Aim) calls below.
         ClearFireTest($"css_poc_stop {slot}");
+        // Same for css_poc_jumptest/crouchtest -- cancel any outstanding
+        // injections, lock release covered by the unconditional Unlock calls below.
+        ClearJumpTest($"css_poc_stop {slot}");
+        ClearCrouchTest($"css_poc_stop {slot}");
 
         var api = BotControllerCap.Get();
         bool wasGate2Active = _gate2Active || _gate2PostCancelActive;
@@ -2321,6 +2782,100 @@ public static class FireSafety
         { error = "bad weaponDefIndex arg -- must be a non-negative integer (omit for default 4, Glock-18)"; return false; }
 
         request = new FireTestRequest(slot, pressCount, pressDurationMs, gapMs, lockMode, weaponDefIndex);
+        error = string.Empty;
+        return true;
+    }
+}
+
+// ---- css_poc_jumptest/css_poc_crouchtest's pure decision logic, same
+// design as FireSafety: free of CounterStrikeSharp AND BotControllerApi
+// types (reuses FireLockMode), kept testable without a server. ----
+
+public readonly record struct JumpTestRequest(int Slot, int JumpCount, int PressDurationMs, FireLockMode LockMode);
+public readonly record struct CrouchTestRequest(int Slot, int HoldCount, int HoldMs, FireLockMode LockMode);
+
+public static class MotorTestSafety
+{
+    public const int DefaultJumpCount = 2;
+    public const int DefaultJumpPressDurationMs = 50;
+    public const int DefaultHoldCount = 2;
+    public const int DefaultHoldMs = 800;
+
+    // Bit 1 / bit 2 -- the standard Source-engine jump/duck inputs. UNLIKE
+    // the movement bits (kInForward etc, InputInjector.cpp) and the attack
+    // bit (corroborated this session via live clip1 evidence, see
+    // FireSafety.AttackButtonMask), these two have NOT been independently
+    // verified anywhere in this codebase before now. They are a HYPOTHESIS
+    // based on the standard layout, to be confirmed or refuted by actual
+    // runtime engine-state evidence (LastJumpTick/velocity/height for jump,
+    // Ducked/DuckAmount for crouch) -- never assumed true merely because
+    // InjectUsercmd accepted the call.
+    public const ulong JumpButtonMask = 1UL << 1;
+    public const ulong DuckButtonMask = 1UL << 2;
+
+    private static bool TryParseLockMode(string? arg, out FireLockMode lockMode, out string error)
+    {
+        lockMode = FireLockMode.None;
+        error = string.Empty;
+        if (string.IsNullOrWhiteSpace(arg) || arg.Equals("none", StringComparison.OrdinalIgnoreCase)) return true;
+        if (arg.Equals("aim", StringComparison.OrdinalIgnoreCase)) { lockMode = FireLockMode.Aim; return true; }
+        if (arg.Equals("all", StringComparison.OrdinalIgnoreCase)) { lockMode = FireLockMode.All; return true; }
+        error = $"bad lockMode arg '{arg}' -- must be none|aim|all (omit for default none)";
+        return false;
+    }
+
+    // args: [slot, jumpCount?, pressDurationMs?, lockMode?]
+    public static bool TryParseJumpTestArgs(IReadOnlyList<string?> args, out JumpTestRequest request, out string error)
+    {
+        request = default;
+        string? Arg(int i) => i < args.Count ? args[i] : null;
+
+        if (!int.TryParse(Arg(0), NumberStyles.Integer, CultureInfo.InvariantCulture, out var slot) || slot < 0)
+        { error = "bad slot arg -- must be a non-negative integer"; return false; }
+
+        int jumpCount = DefaultJumpCount;
+        var jcArg = Arg(1);
+        if (!string.IsNullOrWhiteSpace(jcArg) &&
+            (!int.TryParse(jcArg, NumberStyles.Integer, CultureInfo.InvariantCulture, out jumpCount) || jumpCount < 1))
+        { error = "bad jumpCount arg -- must be a positive integer (omit for default 2)"; return false; }
+
+        int pressDurationMs = DefaultJumpPressDurationMs;
+        var pdArg = Arg(2);
+        if (!string.IsNullOrWhiteSpace(pdArg) &&
+            (!int.TryParse(pdArg, NumberStyles.Integer, CultureInfo.InvariantCulture, out pressDurationMs) || pressDurationMs < 0))
+        { error = "bad pressDurationMs arg -- must be a non-negative integer (omit for default 50)"; return false; }
+
+        if (!TryParseLockMode(Arg(3), out var lockMode, out error)) return false;
+
+        request = new JumpTestRequest(slot, jumpCount, pressDurationMs, lockMode);
+        error = string.Empty;
+        return true;
+    }
+
+    // args: [slot, holdCount?, holdMs?, lockMode?]
+    public static bool TryParseCrouchTestArgs(IReadOnlyList<string?> args, out CrouchTestRequest request, out string error)
+    {
+        request = default;
+        string? Arg(int i) => i < args.Count ? args[i] : null;
+
+        if (!int.TryParse(Arg(0), NumberStyles.Integer, CultureInfo.InvariantCulture, out var slot) || slot < 0)
+        { error = "bad slot arg -- must be a non-negative integer"; return false; }
+
+        int holdCount = DefaultHoldCount;
+        var hcArg = Arg(1);
+        if (!string.IsNullOrWhiteSpace(hcArg) &&
+            (!int.TryParse(hcArg, NumberStyles.Integer, CultureInfo.InvariantCulture, out holdCount) || holdCount < 1))
+        { error = "bad holdCount arg -- must be a positive integer (omit for default 2)"; return false; }
+
+        int holdMs = DefaultHoldMs;
+        var hmArg = Arg(2);
+        if (!string.IsNullOrWhiteSpace(hmArg) &&
+            (!int.TryParse(hmArg, NumberStyles.Integer, CultureInfo.InvariantCulture, out holdMs) || holdMs < 1))
+        { error = "bad holdMs arg -- must be a positive integer (omit for default 800)"; return false; }
+
+        if (!TryParseLockMode(Arg(3), out var lockMode, out error)) return false;
+
+        request = new CrouchTestRequest(slot, holdCount, holdMs, lockMode);
         error = string.Empty;
         return true;
     }
