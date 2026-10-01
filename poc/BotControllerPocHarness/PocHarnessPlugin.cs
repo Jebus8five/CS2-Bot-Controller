@@ -1080,8 +1080,14 @@ public sealed class PocHarnessPlugin : BasePlugin
         try
         {
             bool onGround = pawn.OnGroundLastTick;
-            var ms = pawn.MovementServices;
-            if (ms is null) return (false, false, -1, "no MovementServices");
+            // pawn.MovementServices is statically typed as the base
+            // CPlayer_MovementServices; LastJumpTick lives on the CS-specific
+            // CCSPlayer_MovementServices subtype (confirmed via reflection:
+            // CCSPlayer_MovementServices.IsSubclassOf(CPlayer_MovementServices)
+            // == true), so it needs an explicit cast -- the first build of
+            // this command failed on exactly this (verified the wrong type).
+            var ms = pawn.MovementServices as CCSPlayer_MovementServices;
+            if (ms is null) return (false, false, -1, "no CCSPlayer_MovementServices");
             return (true, onGround, ms.LastJumpTick, "ok");
         }
         catch (Exception ex) { return (false, false, -1, $"unreadable:{ex.GetType().Name}"); }
@@ -1308,8 +1314,10 @@ public sealed class PocHarnessPlugin : BasePlugin
     {
         try
         {
-            var ms = pawn.MovementServices;
-            if (ms is null) return (false, false, false, 0f, "no MovementServices");
+            // Same cast as ReadJumpState above: Ducked/Ducking/DuckAmount live
+            // on CCSPlayer_MovementServices, not the base CPlayer_MovementServices.
+            var ms = pawn.MovementServices as CCSPlayer_MovementServices;
+            if (ms is null) return (false, false, false, 0f, "no CCSPlayer_MovementServices");
             return (true, ms.Ducked, ms.Ducking, ms.DuckAmount, "ok");
         }
         catch (Exception ex) { return (false, false, false, 0f, $"unreadable:{ex.GetType().Name}"); }
